@@ -5,10 +5,11 @@ import jsPDF from 'jspdf'
 import html2canvas from 'html2canvas'
 import {
   BarChart3, CalendarRange, Download, Edit, Factory, Filter, Hammer, LogIn, LogOut,
-  Mail, Plus, RefreshCw, Save, Search, Trash2, Upload, Cloud, Database, FileText
+  Mail, Plus, RefreshCw, Save, Search, Trash2, Upload, Cloud, Database, FileText,
+  QrCode, Share2, Send
 } from 'lucide-react'
 import {
-  ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
+  ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
   Bar, ComposedChart, Line
 } from 'recharts'
 import KPI from '@/components/KPI'
@@ -78,8 +79,10 @@ export default function App(){
   const [reportMonth, setReportMonth] = useState(dayjs().format('YYYY-MM')) // input type="month"
 
   const emailRef = useRef(null)
-  const dailyReportRef = useRef(null)
-  const monthlyReportRef = useRef(null)
+
+  // QR states
+  const [qrOpen, setQrOpen] = useState(false)
+  const qrInstanceRef = useRef(null)
 
   // Local load/save
   useEffect(() => {
@@ -377,7 +380,7 @@ export default function App(){
   const { data: moagemStack, equipList: moagemEquipList } = useMemo(()=>stackedByEquipment('Moagem'), [filtered])
   const { data: britagemStack, equipList: britagemEquipList } = useMemo(()=>stackedByEquipment('Britagem'), [filtered])
 
-  // -------- PDFs ----------
+  // -------- PDFs (HTML render) ----------
   function renderDailyHTML(dateStr){
     const data = entries.filter(e => e.date === dateStr)
     const sum = (arr, fn) => arr.reduce((acc, x) => acc + (fn(x) || 0), 0)
@@ -437,6 +440,53 @@ export default function App(){
       </div>
     `
   }
+
+  // -------- Helpers de PDF e Compartilhamento ----------
+  function downloadBlob(blob, filename){
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = filename; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  async function htmlToPDFBlob(html){
+    const wrapper = document.createElement('div')
+    wrapper.innerHTML = html
+    document.body.appendChild(wrapper)
+
+    const canvas = await html2canvas(wrapper, { scale: 2 })
+    const img = canvas.toDataURL('image/png')
+    const pdf = new jsPDF('p','mm','a4')
+    const pdfW = pdf.internal.pageSize.getWidth()
+    const pdfH = (canvas.height * pdfW) / canvas.width
+    pdf.addImage(img, 'PNG', 0, 0, pdfW, pdfH)
+    const blob = pdf.output('blob')
+
+    document.body.removeChild(wrapper)
+    return blob
+  }
+
+  async function shareFileOrDownload({ blob, filename, title, text, fallbackWhatsApp=false }){
+    const file = new File([blob], filename, { type: 'application/pdf' })
+
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title, text })
+      return
+    }
+
+    // Fallback: baixa o PDF e abre o app/alvo sem anexo automático
+    downloadBlob(blob, filename)
+
+    if (fallbackWhatsApp) {
+      const msg = text || 'Envio do relatório em PDF. Anexar o arquivo baixado.'
+      window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
+    } else {
+      const subject = title || 'Relatório'
+      const body = (text ? text + '\n\n' : '') + `Caso não apareça anexado automaticamente, selecione o arquivo ${filename} que acabou de ser baixado.`
+      window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+    }
+  }
+
   async function exportDailyPDF(){
     const wrapper = document.createElement('div')
     wrapper.innerHTML = renderDailyHTML(reportDate)
@@ -464,27 +514,83 @@ export default function App(){
     document.body.removeChild(wrapper)
   }
 
-  // Auth actions
-  async function signInWithEmail(){
-    if (!supabase) { setMsg('Configure as variáveis do Supabase para autenticar.'); return }
-    const email = emailRef.current?.value?.trim()
-    if (!email) return setMsg('Informe um e-mail válido.')
-    const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.href } })
-    if (error) return setMsg('Falha ao enviar link. Verifique o e-mail.')
-    setMsg('Link de acesso enviado ao e-mail.')
+  // Compartilhar (WhatsApp / E-mail)
+  async function sendDailyWhatsApp(){
+    const html = renderDailyHTML(reportDate)
+    const blob = await htmlToPDFBlob(html)
+    await shareFileOrDownload({
+      blob,
+      filename: `relatorio_diario_${reportDate}.pdf`,
+      title: `Relatório Diário ${dayjs(reportDate).format('DD/MM/YYYY')}`,
+      text: `Relatório Diário ${dayjs(reportDate).format('DD/MM/YYYY')}`,
+      fallbackWhatsApp: true
+    })
   }
-  async function signOut(){ if (supabase){ await supabase.auth.signOut(); setSession(null) } }
-  async function manualSync(){
-    if (!session?.user) { setMsg('Entre para sincronizar com a nuvem.'); return }
-    setIsSyncing(true)
-    try {
-      await flushPending()
-      for (const e of entries) await upsertCloud(e)
-      await fetchCloudEntries(session.user.id)
-      setMsg('Sincronização concluída.')
-    } finally { setIsSyncing(false) }
+  async function sendDailyEmail(){
+    const html = renderDailyHTML(reportDate)
+    const blob = await htmlToPDFBlob(html)
+    await shareFileOrDownload({
+      blob,
+      filename: `relatorio_diario_${reportDate}.pdf`,
+      title: `Relatório Diário ${dayjs(reportDate).format('DD/MM/YYYY')}`,
+      text: `Segue relatório diário ${dayjs(reportDate).format('DD/MM/YYYY')} em PDF.`
+    })
+  }
+  async function sendMonthlyWhatsApp(){
+    const html = renderMonthlyHTML(reportMonth)
+    const blob = await htmlToPDFBlob(html)
+    await shareFileOrDownload({
+      blob,
+      filename: `relatorio_mensal_${reportMonth}.pdf`,
+      title: `Relatório Mensal ${dayjs(reportMonth+'-01').format('MM/YYYY')}`,
+      text: `Relatório Mensal ${dayjs(reportMonth+'-01').format('MM/YYYY')}`,
+      fallbackWhatsApp: true
+    })
+  }
+  async function sendMonthlyEmail(){
+    const html = renderMonthlyHTML(reportMonth)
+    const blob = await htmlToPDFBlob(html)
+    await shareFileOrDownload({
+      blob,
+      filename: `relatorio_mensal_${reportMonth}.pdf`,
+      title: `Relatório Mensal ${dayjs(reportMonth+'-01').format('MM/YYYY')}`,
+      text: `Segue relatório mensal ${dayjs(reportMonth+'-01').format('MM/YYYY')} em PDF.`
+    })
   }
 
+  // -------- QR Code (equipamento) ----------
+  async function openQR(){
+    setQrOpen(true)
+    setTimeout(initQR, 0)
+  }
+  async function initQR(){
+    try{
+      const { Html5Qrcode } = await import('html5-qrcode')
+      qrInstanceRef.current = new Html5Qrcode('qr-reader')
+      await qrInstanceRef.current.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: { width: 250, height: 250 } },
+        (decodedText) => {
+          setForm(prev => ({ ...prev, equipment: decodedText.trim() }))
+          closeQR()
+        },
+        (_err) => {}
+      )
+    } catch (e){
+      setMsg('Não foi possível acessar a câmera. Verifique permissões e HTTPS.')
+      setQrOpen(false)
+    }
+  }
+  function closeQR(){
+    const inst = qrInstanceRef.current
+    if (inst) {
+      inst.stop().then(() => inst.clear()).catch(()=>{})
+      qrInstanceRef.current = null
+    }
+    setQrOpen(false)
+  }
+
+  // -------- UI --------
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <Message text={msg} onClose={() => setMsg('')} />
@@ -493,7 +599,7 @@ export default function App(){
           <div className="p-2 rounded-xl bg-slate-100"><Factory className="h-6 w-6" /></div>
           <div className="flex-1">
             <h1 className="text-xl md:text-2xl font-bold leading-tight">Lançamentos de Produção – Mineração</h1>
-            <p className="text-sm text-slate-500">Registre Britagem e Moagem. Offline-first + Supabase + PDF.</p>
+            <p className="text-sm text-slate-500">Registre Britagem e Moagem. Offline-first + Supabase + PDF + QR.</p>
           </div>
           <div className="flex items-center gap-2">
             <button className="px-3 py-2 border rounded-md text-sm hover:bg-slate-50" onClick={exportCSV}><Download className="inline mr-2 h-4 w-4"/>CSV</button>
@@ -502,7 +608,7 @@ export default function App(){
               <Upload className="h-4 w-4"/> Importar
               <input type="file" accept="application/json" className="hidden" onChange={(e) => e.target.files?.[0] && importJSON(e.target.files[0])} />
             </label>
-            <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-60" onClick={manualSync} disabled={isSyncing}><Cloud className="inline mr-2 h-4 w-4"/>{isSyncing ? 'Sincronizando...' : 'Sincronizar'}</button>
+            <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-60" onClick={flushPending} disabled={isSyncing}><Cloud className="inline mr-2 h-4 w-4"/>{isSyncing ? 'Sincronizando...' : 'Sincronizar'}</button>
           </div>
         </div>
 
@@ -511,13 +617,20 @@ export default function App(){
             <div className="text-sm text-slate-600 flex items-center gap-3">
               <Database className="h-4 w-4"/>
               <span>Conectado: <b>{session.user.email || session.user.id}</b></span>
-              <button className="px-3 py-2 border rounded-md text-sm hover:bg-slate-50" onClick={signOut}><LogOut className="inline mr-2 h-4 w-4"/>Sair</button>
+              <button className="px-3 py-2 border rounded-md text-sm hover:bg-slate-50" onClick={async()=>{ await supabase.auth.signOut(); setSession(null) }}><LogOut className="inline mr-2 h-4 w-4"/>Sair</button>
             </div>
           ) : (
             <div className="flex items-center gap-2">
               <Mail className="h-4 w-4 text-slate-400"/>
               <input ref={emailRef} type="email" placeholder="seu@email.com" className="w-64 px-3 py-2 border rounded-md"/>
-              <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={signInWithEmail}><LogIn className="inline mr-2 h-4 w-4"/>Entrar por e-mail</button>
+              <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={async()=>{
+                if (!supabase) { setMsg('Configure as variáveis do Supabase para autenticar.'); return }
+                const email = emailRef.current?.value?.trim()
+                if (!email) return setMsg('Informe um e-mail válido.')
+                const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.href } })
+                if (error) return setMsg('Falha ao enviar link. Verifique o e-mail.')
+                setMsg('Link de acesso enviado ao e-mail.')
+              }}><LogIn className="inline mr-2 h-4 w-4"/>Entrar por e-mail</button>
               {(!SUPABASE_URL || !SUPABASE_ANON) ? (<span className="text-xs text-amber-600 ml-2">Defina VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY</span>) : null}
             </div>
           )}
@@ -535,7 +648,25 @@ export default function App(){
               <div><label className="text-sm">Início</label><input type="time" className="w-full px-3 py-2 border rounded-md" value={form.start} onChange={e=>setForm({...form, start:e.target.value})} /></div>
               <div><label className="text-sm">Fim</label><input type="time" className="w-full px-3 py-2 border rounded-md" value={form.end} onChange={e=>setForm({...form, end:e.target.value})} /></div>
               <div><label className="text-sm">Etapa</label><select className="w-full px-3 py-2 border rounded-md" value={form.stage} onChange={e=>setForm({...form, stage:e.target.value})}><option>Britagem</option><option>Moagem</option></select></div>
-              <div><label className="text-sm">Equipamento</label><input className="w-full px-3 py-2 border rounded-md" placeholder="Ex.: BT-01 / MM-01" value={form.equipment} onChange={e=>setForm({...form, equipment:e.target.value})} /></div>
+              <div>
+                <label className="text-sm">Equipamento</label>
+                <div className="flex gap-2">
+                  <input
+                    className="w-full px-3 py-2 border rounded-md"
+                    placeholder="Ex.: BT-01 / MM-01"
+                    value={form.equipment}
+                    onChange={e=>setForm({...form, equipment:e.target.value})}
+                  />
+                  <button
+                    type="button"
+                    onClick={openQR}
+                    className="px-3 py-2 border rounded-md hover:bg-slate-50"
+                    title="Ler código QR com a câmera"
+                  >
+                    <QrCode className="h-4 w-4"/>
+                  </button>
+                </div>
+              </div>
               <div><label className="text-sm">Toneladas (t)</label><input type="number" step="0.01" inputMode="decimal" className="w-full px-3 py-2 border rounded-md" value={form.tonnage} onChange={e=>setForm({...form, tonnage:e.target.value})} required /></div>
               <div><label className="text-sm">Umidade (%)</label><input type="number" step="0.1" inputMode="decimal" className="w-full px-3 py-2 border rounded-md" value={form.moisture} onChange={e=>setForm({...form, moisture:e.target.value})} /></div>
               <div><label className="text-sm">Paradas (min)</label><input type="number" step="1" inputMode="numeric" className="w-full px-3 py-2 border rounded-md" value={form.downtime_min} onChange={e=>setForm({...form, downtime_min:e.target.value})} /></div>
@@ -732,15 +863,35 @@ export default function App(){
                 <label className="text-sm">Relatório Mensal – Mês</label>
                 <input type="month" className="w-full px-3 py-2 border rounded-md" value={reportMonth} onChange={(e)=>setReportMonth(e.target.value)} />
               </div>
-              <div className="col-span-1 flex items-end gap-2">
+              <div className="col-span-1 flex items-end gap-2 flex-wrap">
                 <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={exportDailyPDF}>PDF Diário</button>
+                <button className="px-3 py-2 border rounded-md hover:bg-slate-50" onClick={sendDailyWhatsApp} title="Compartilhar via WhatsApp"><Send className="inline h-4 w-4 mr-1"/>WA</button>
+                <button className="px-3 py-2 border rounded-md hover:bg-slate-50" onClick={sendDailyEmail} title="Enviar por e-mail"><Share2 className="inline h-4 w-4 mr-1"/>E-mail</button>
                 <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={exportMonthlyPDF}>PDF Mensal</button>
+                <button className="px-3 py-2 border rounded-md hover:bg-slate-50" onClick={sendMonthlyWhatsApp} title="Compartilhar via WhatsApp"><Send className="inline h-4 w-4 mr-1"/>WA</button>
+                <button className="px-3 py-2 border rounded-md hover:bg-slate-50" onClick={sendMonthlyEmail} title="Enviar por e-mail"><Share2 className="inline h-4 w-4 mr-1"/>E-mail</button>
               </div>
             </div>
           </div>
 
         </div>
       </main>
+
+      {/* Modal QR */}
+      {qrOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-lg p-4 w-full max-w-sm">
+            <div className="flex items-center justify-between mb-2">
+              <div className="font-semibold">Ler QR – Equipamento</div>
+              <button onClick={closeQR} className="px-2 py-1 border rounded hover:bg-slate-50">Fechar</button>
+            </div>
+            <div id="qr-reader" className="w-full h-[320px] bg-black rounded-md" />
+            <p className="text-xs text-slate-500 mt-2">
+              Dica: mire o QR da etiqueta do equipamento. Requer permissão da câmera (HTTPS).
+            </p>
+          </div>
+        </div>
+      )}
 
       <footer className="mx-auto max-w-7xl px-4 pb-8 pt-2 text-xs text-slate-500 space-y-1">
         <div><b>Dica:</b> defina as variáveis do Supabase em <code>.env</code> antes de usar a nuvem. O app funciona offline e sincroniza quando você clicar em <b>Sincronizar</b>.</div>
