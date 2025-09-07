@@ -4,7 +4,7 @@ import dayjs from 'dayjs'
 import jsPDF from 'jspdf'
 import html2canvas from 'html2canvas'
 import {
-  BarChart3, CalendarRange, Download, Edit, Factory, Filter, Hammer, LogIn, LogOut,
+  BarChart3, CalendarRange, Download, Factory, Filter, Hammer, LogIn, LogOut,
   Mail, Plus, RefreshCw, Save, Search, Trash2, Upload, Cloud, Database, FileText,
   QrCode, Share2, Send, Settings, Wrench, PlusCircle, MinusCircle, Target, Star
 } from 'lucide-react'
@@ -19,7 +19,7 @@ import Message from '@/components/Message'
 // ------------------------------
 // Constantes, Storage, Utils
 // ------------------------------
-const STORAGE_KEY = 'prado_mineracao_producao_v3'
+const STORAGE_KEY = 'prado_mineracao_producao_v4'          // bump para forçar recálculo local
 const STORAGE_PENDING = 'prado_mineracao_pending_queue_v3'
 const STORAGE_EQUIP = 'prado_mineracao_equip_v1'
 const STORAGE_TARGETS = 'prado_mineracao_targets_v1'
@@ -110,9 +110,10 @@ export default function App(){
   const [goldMonth, setGoldMonth] = useState(dayjs().format('YYYY-MM'))
   const [goldKg, setGoldKg] = useState('')
 
-  // QR
+  // QR + realtime
   const [qrOpen, setQrOpen] = useState(false)
   const qrInstanceRef = useRef(null)
+  const realtimeRef = useRef(null)
 
   // ---------- Carregamento inicial ----------
   useEffect(() => {
@@ -158,11 +159,46 @@ export default function App(){
     list.push(op)
     localStorage.setItem(STORAGE_PENDING, JSON.stringify(list))
   }
+
+  async function fetchEntriesFromCloud() {
+    if (!supabase || !session?.user) return
+    const { data, error } = await supabase
+      .from('production_entries')
+      .select('*')
+      .order('date', { ascending: true })
+    if (error) { setMsg('Falha ao buscar da nuvem.'); return }
+    setEntries(prev => {
+      const map = new Map(prev.map(e => [e.id, e]))
+      for (const e of (data || [])) map.set(e.id, e)
+      return Array.from(map.values()).sort((a,b) =>
+        a.date < b.date ? -1 : a.date > b.date ? 1 :
+        String(a.createdAt||'').localeCompare(String(b.createdAt||''))
+      )
+    })
+  }
+
+  function subscribeRealtime() {
+    if (!supabase || !session?.user || realtimeRef.current) return
+    realtimeRef.current = supabase
+      .channel('prod_entries')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'production_entries',
+          filter: `user_id=eq.${session.user.id}`
+        },
+        () => { fetchEntriesFromCloud() }
+      )
+      .subscribe()
+  }
+
   async function flushPending(){
     if (!supabase || !session?.user) return
     const raw = localStorage.getItem(STORAGE_PENDING)
     const list = raw ? JSON.parse(raw) : []
-    if (!list.length) return
+    if (!list.length) { await fetchEntriesFromCloud(); return }
     setIsSyncing(true)
     try{
       for (const op of list){
@@ -174,8 +210,32 @@ export default function App(){
       }
       localStorage.removeItem(STORAGE_PENDING)
       setMsg('Pendências sincronizadas.')
-    } finally { setIsSyncing(false) }
+    } finally {
+      setIsSyncing(false)
+      await fetchEntriesFromCloud()
+    }
   }
+
+  // Auto sync ao logar + realtime
+  useEffect(() => {
+    (async () => {
+      if (session?.user && supabase) {
+        await flushPending()
+        await fetchEntriesFromCloud()
+        subscribeRealtime()
+      }
+    })()
+  }, [session])
+
+  // cleanup realtime no unmount
+  useEffect(() => {
+    return () => {
+      if (realtimeRef.current) {
+        try { supabase.removeChannel(realtimeRef.current) } catch {}
+        realtimeRef.current = null
+      }
+    }
+  }, [])
 
   // ---------- Lançamento ----------
   const totalStopsMin = useMemo(() => {
@@ -237,6 +297,7 @@ export default function App(){
     try {
       if (supabase && session?.user) {
         await supabase.from('production_entries').upsert(payload)
+        await fetchEntriesFromCloud()
       } else {
         queuePending({ type: 'upsert', payload })
       }
@@ -252,8 +313,12 @@ export default function App(){
   async function handleDelete(id){
     setEntries(prev => prev.filter(x => x.id !== id))
     try {
-      if (supabase && session?.user) await supabase.from('production_entries').delete().eq('id', id)
-      else queuePending({ type: 'delete', id })
+      if (supabase && session?.user) {
+        await supabase.from('production_entries').delete().eq('id', id)
+        await fetchEntriesFromCloud()
+      } else {
+        queuePending({ type: 'delete', id })
+      }
       setMsg('Lançamento removido.')
     } catch {
       queuePending({ type: 'delete', id })
@@ -616,7 +681,7 @@ export default function App(){
           <div className="p-2 rounded-xl bg-slate-100"><Factory className="h-6 w-6" /></div>
           <div className="flex-1">
             <h1 className="text-xl md:text-2xl font-bold leading-tight">Mineração – Lançamentos & Dash</h1>
-            <p className="text-sm text-slate-500">Britagem e Moagem separados · Período livre · PWA offline · QR · PDF · Ouro</p>
+            <p className="text-sm text-slate-500">Britagem e Moagem separados · Período livre · PWA offline · QR · PDF · Ouro · Synced</p>
           </div>
           <div className="flex items-center gap-2">
             <button className="px-3 py-2 border rounded-md text-sm hover:bg-slate-50" onClick={exportCSV}><Download className="inline mr-2 h-4 w-4"/>CSV</button>
@@ -814,7 +879,7 @@ export default function App(){
           <div className="rounded-2xl border bg-white shadow-sm">
             <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Filter className="h-5 w-5"/> Lançamentos (período aplicado)</div>
             <div className="px-4 pb-3 flex items-center gap-2">
-              <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={exportPeriodPDF}>PDF do Período</button>
+              <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={exportPeriodPDF}><FileText className="inline h-4 w-4 mr-1"/>PDF do Período</button>
               <button className="px-3 py-2 border rounded-md hover:bg-slate-50" onClick={sendPeriodWhatsApp}><Send className="inline h-4 w-4 mr-1"/>WA</button>
               <button className="px-3 py-2 border rounded-md hover:bg-slate-50" onClick={sendPeriodEmail}><Share2 className="inline h-4 w-4 mr-1"/>E-mail</button>
             </div>
