@@ -12,21 +12,19 @@ import {
   ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
   Bar, ComposedChart, Line
 } from 'recharts'
+
+// Se esses 3 componentes não existirem no seu projeto, troque por <div> simples.
 import KPI from '@/components/KPI'
 import ClockIcon from '@/components/ClockIcon'
 import Message from '@/components/Message'
 
-// ------------------------------
-// Constantes, Storage, Utils
-// ------------------------------
-const STORAGE_KEY = 'prado_mineracao_producao_v4'          // bump para forçar recálculo local
-const STORAGE_PENDING = 'prado_mineracao_pending_queue_v3'
+const STORAGE_KEY = 'prado_mineracao_producao_v5'
+const STORAGE_PENDING = 'prado_mineracao_pending_queue_v4'
 const STORAGE_EQUIP = 'prado_mineracao_equip_v1'
 const STORAGE_TARGETS = 'prado_mineracao_targets_v1'
 const STORAGE_GOLD = 'prado_mineracao_gold_v1'
 
 function uid(){ return Math.random().toString(36).slice(2) + Date.now().toString(36) }
-
 function parseTimeToHours(start, end){
   if (!start || !end) return 0
   const [sh, sm] = start.split(':').map(Number)
@@ -44,96 +42,73 @@ function diffMinutes(start, end){
   return mins
 }
 function cleanText(s){
-  return String(s ?? '')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
+  return String(s ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\s+/g, ' ').trim()
 }
 function formatNumber(n, frac=2){
   if (n === undefined || n === null || isNaN(n)) return '0'
   return new Intl.NumberFormat('pt-BR', { maximumFractionDigits: frac }).format(Number(n))
 }
 
-// Cores fixas para equipamentos + fallback
 const EQUIP_COLORS = { 'MM-01': '#facc15', 'MM-02': '#f97316', 'BT-01': '#22c55e' }
 const PALETTE = ['#60a5fa','#a78bfa','#34d399','#f472b6','#f59e0b','#10b981','#ef4444','#14b8a6','#8b5cf6','#e11d48']
-function colorForEquipment(name, idx){
-  const key = (name || '').toUpperCase()
-  if (EQUIP_COLORS[key]) return EQUIP_COLORS[key]
-  return PALETTE[idx % PALETTE.length]
-}
+const colorForEquipment = (name, idx) => EQUIP_COLORS[(name||'').toUpperCase()] || PALETTE[idx % PALETTE.length]
 
-// ------------------------------
-// Supabase (opcional)
-// ------------------------------
+// -------- Supabase --------
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || ''
 const SUPABASE_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
 const supabase = (SUPABASE_URL && SUPABASE_ANON) ? createClient(SUPABASE_URL, SUPABASE_ANON) : null
 
 export default function App(){
-  // Sessão & mensagens
   const [session, setSession] = useState(null)
   const [isSyncing, setIsSyncing] = useState(false)
   const [msg, setMsg] = useState('')
   const emailRef = useRef(null)
 
-  // Dados principais
   const today = dayjs().format('YYYY-MM-DD')
   const [entries, setEntries] = useState([])
 
-  // Formulário de lançamento
   const [form, setForm] = useState({
     date: today, start: '07:00', end: '19:00', shift: 'Diurno',
     stage: 'Britagem', equipment: '', tonnage: '', moisture: '',
     operator: '', notes: '',
-    stops: [{ id: uid(), from: '', to: '', cause: '' }], // paradas
+    stops: [{ id: uid(), from: '', to: '', cause: '' }],
     tph_target: '', grade: '',
   })
   const [allowEditTarget, setAllowEditTarget] = useState(false)
 
-  // Filtros (período livre)
   const [filters, setFilters] = useState({ from: today, to: today, stage: 'Todos', query: '' })
   const [quickMonth, setQuickMonth] = useState(dayjs().format('YYYY-MM'))
   const [reportDate, setReportDate] = useState(today)
   const [reportMonth, setReportMonth] = useState(dayjs().format('YYYY-MM'))
 
-  // Equipamentos
-  const [equipments, setEquipments] = useState([]) // {id, code, stage, active}
+  const [equipments, setEquipments] = useState([])
   const [equipModal, setEquipModal] = useState(false)
   const [newEquip, setNewEquip] = useState({ code: '', stage: 'Britagem', active: true })
 
-  // Metas fixas por etapa
   const [targets, setTargets] = useState({ Britagem: 0, Moagem: 0 })
 
-  // Ouro (mensal)
-  const [goldRecords, setGoldRecords] = useState([]) // {id, period:'YYYY-MM', kg:number}
+  const [goldRecords, setGoldRecords] = useState([])
   const [goldMonth, setGoldMonth] = useState(dayjs().format('YYYY-MM'))
   const [goldKg, setGoldKg] = useState('')
 
-  // QR + realtime
   const [qrOpen, setQrOpen] = useState(false)
   const qrInstanceRef = useRef(null)
   const realtimeRef = useRef(null)
 
-  // ---------- Carregamento inicial ----------
+  // ---- Load local ----
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (raw) setEntries(JSON.parse(raw))
-      const eq = localStorage.getItem(STORAGE_EQUIP)
-      if (eq) setEquipments(JSON.parse(eq))
-      const tg = localStorage.getItem(STORAGE_TARGETS)
-      if (tg) setTargets(JSON.parse(tg))
-      const gr = localStorage.getItem(STORAGE_GOLD)
-      if (gr) setGoldRecords(JSON.parse(gr))
-    } catch (e) {}
+      const raw = localStorage.getItem(STORAGE_KEY); if (raw) setEntries(JSON.parse(raw))
+      const eq = localStorage.getItem(STORAGE_EQUIP); if (eq) setEquipments(JSON.parse(eq))
+      const tg = localStorage.getItem(STORAGE_TARGETS); if (tg) setTargets(JSON.parse(tg))
+      const gr = localStorage.getItem(STORAGE_GOLD); if (gr) setGoldRecords(JSON.parse(gr))
+    } catch {}
   }, [])
-  useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(entries)) }, [entries])
-  useEffect(() => { localStorage.setItem(STORAGE_EQUIP, JSON.stringify(equipments)) }, [equipments])
-  useEffect(() => { localStorage.setItem(STORAGE_TARGETS, JSON.stringify(targets)) }, [targets])
-  useEffect(() => { localStorage.setItem(STORAGE_GOLD, JSON.stringify(goldRecords)) }, [goldRecords])
+  useEffect(()=>{ localStorage.setItem(STORAGE_KEY, JSON.stringify(entries)) }, [entries])
+  useEffect(()=>{ localStorage.setItem(STORAGE_EQUIP, JSON.stringify(equipments)) }, [equipments])
+  useEffect(()=>{ localStorage.setItem(STORAGE_TARGETS, JSON.stringify(targets)) }, [targets])
+  useEffect(()=>{ localStorage.setItem(STORAGE_GOLD, JSON.stringify(goldRecords)) }, [goldRecords])
 
-  // Seed equipamentos padrão
   useEffect(() => {
     if (equipments.length === 0){
       setEquipments([
@@ -142,9 +117,9 @@ export default function App(){
         { id: uid(), code: 'MM-02', stage: 'Moagem', active: true },
       ])
     }
-  }, [])
+  }, [equipments.length])
 
-  // Supabase auth (opcional)
+  // ---- Auth ----
   useEffect(() => {
     if (!supabase) return
     supabase.auth.getSession().then(({ data }) => setSession(data.session || null))
@@ -152,7 +127,7 @@ export default function App(){
     return () => { sub?.subscription.unsubscribe() }
   }, [])
 
-  // ---------- Helpers Cloud ----------
+  // ---- Cloud helpers ----
   function queuePending(op){
     const raw = localStorage.getItem(STORAGE_PENDING)
     const list = raw ? JSON.parse(raw) : []
@@ -165,9 +140,10 @@ export default function App(){
     const { data, error } = await supabase
       .from('production_entries')
       .select('*')
+      .eq('user_id', session.user.id) // pega só do usuário logado
       .order('date', { ascending: true })
     if (error) { setMsg('Falha ao buscar da nuvem.'); return }
-    setEntries(prev => {
+    setEntries((prev) => {
       const map = new Map(prev.map(e => [e.id, e]))
       for (const e of (data || [])) map.set(e.id, e)
       return Array.from(map.values()).sort((a,b) =>
@@ -183,12 +159,7 @@ export default function App(){
       .channel('prod_entries')
       .on(
         'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'production_entries',
-          filter: `user_id=eq.${session.user.id}`
-        },
+        { event: '*', schema: 'public', table: 'production_entries', filter: `user_id=eq.${session.user.id}` },
         () => { fetchEntriesFromCloud() }
       )
       .subscribe()
@@ -203,20 +174,24 @@ export default function App(){
     try{
       for (const op of list){
         if (op.type === 'upsert') {
-          await supabase.from('production_entries').upsert(op.payload)
+          const payload = { ...op.payload, user_id: op.payload.user_id || session.user.id }
+          const { error } = await supabase.from('production_entries').upsert(payload)
+          if (error) throw error
         } else if (op.type === 'delete') {
-          await supabase.from('production_entries').delete().eq('id', op.id)
+          const { error } = await supabase.from('production_entries').delete().eq('id', op.id).eq('user_id', session.user.id)
+          if (error) throw error
         }
       }
       localStorage.removeItem(STORAGE_PENDING)
       setMsg('Pendências sincronizadas.')
+    } catch (e){
+      setMsg('Erro ao sincronizar pendências. Verifique o Supabase.')
     } finally {
       setIsSyncing(false)
       await fetchEntriesFromCloud()
     }
   }
 
-  // Auto sync ao logar + realtime
   useEffect(() => {
     (async () => {
       if (session?.user && supabase) {
@@ -227,7 +202,6 @@ export default function App(){
     })()
   }, [session])
 
-  // cleanup realtime no unmount
   useEffect(() => {
     return () => {
       if (realtimeRef.current) {
@@ -237,25 +211,17 @@ export default function App(){
     }
   }, [])
 
-  // ---------- Lançamento ----------
-  const totalStopsMin = useMemo(() => {
-    return (form.stops || []).reduce((acc, s) => acc + (diffMinutes(s.from, s.to) || 0), 0)
-  }, [form.stops])
+  // ---- Lançamentos ----
+  const totalStopsMin = useMemo(() => (form.stops||[]).reduce((acc,s)=>acc+(diffMinutes(s.from,s.to)||0),0), [form.stops])
 
   useEffect(() => {
-    const t = Number(targets[form.stage] || 0)
+    const t = Number((targets||{})[form.stage] || 0)
     setForm(prev => ({ ...prev, tph_target: t ? String(t) : '' }))
   }, [form.stage, targets])
 
-  function addStop(){
-    setForm(prev => ({ ...prev, stops: [...prev.stops, { id: uid(), from: '', to: '', cause: '' }] }))
-  }
-  function removeStop(id){
-    setForm(prev => ({ ...prev, stops: prev.stops.filter(s => s.id !== id) }))
-  }
-  function updateStop(id, patch){
-    setForm(prev => ({ ...prev, stops: prev.stops.map(s => s.id === id ? { ...s, ...patch } : s) }))
-  }
+  function addStop(){ setForm(prev => ({ ...prev, stops: [...prev.stops, { id: uid(), from: '', to: '', cause: '' }] })) }
+  function removeStop(id){ setForm(prev => ({ ...prev, stops: prev.stops.filter(s => s.id !== id) })) }
+  function updateStop(id, patch){ setForm(prev => ({ ...prev, stops: prev.stops.map(s => s.id === id ? { ...s, ...patch } : s) })) }
 
   function resetForm(){
     setForm({
@@ -278,12 +244,13 @@ export default function App(){
 
     const payload = {
       id: uid(),
+      user_id: session?.user?.id || null, // <<<<<< IMPORTANTE para sincronizar
       date: form.date, start: form.start, end: form.end, shift: form.shift, stage: form.stage,
       equipment: form.equipment, tonnage,
       moisture: form.moisture !== '' ? Number(form.moisture) : undefined,
       operator: cleanText(form.operator), notes: cleanText(form.notes),
       hours, tph,
-      downtime_min: downtimeMin, downtime_cause: cleanText(form.stops?.map(s=>s.cause).filter(Boolean).join('; ')),
+      downtime_min: downtimeMin, downtime_cause: cleanText((form.stops||[]).map(s=>s.cause).filter(Boolean).join('; ')),
       op_hours: opHours, tph_operational: tphOperational,
       tph_target: form.tph_target !== '' ? Number(form.tph_target) : undefined,
       tph_delta: (form.tph_target && tphOperational) ? +(tphOperational - Number(form.tph_target)).toFixed(2) : undefined,
@@ -296,7 +263,8 @@ export default function App(){
 
     try {
       if (supabase && session?.user) {
-        await supabase.from('production_entries').upsert(payload)
+        const { error } = await supabase.from('production_entries').upsert(payload)
+        if (error) throw error
         await fetchEntriesFromCloud()
       } else {
         queuePending({ type: 'upsert', payload })
@@ -314,7 +282,8 @@ export default function App(){
     setEntries(prev => prev.filter(x => x.id !== id))
     try {
       if (supabase && session?.user) {
-        await supabase.from('production_entries').delete().eq('id', id)
+        const { error } = await supabase.from('production_entries').delete().eq('id', id).eq('user_id', session.user.id)
+        if (error) throw error
         await fetchEntriesFromCloud()
       } else {
         queuePending({ type: 'delete', id })
@@ -326,12 +295,11 @@ export default function App(){
     }
   }
 
-  // ---------- Equipamentos ----------
+  // ---- Equipamentos ----
   const equipByStage = useMemo(() => ({
     Britagem: equipments.filter(e => e.stage === 'Britagem' && e.active),
     Moagem: equipments.filter(e => e.stage === 'Moagem' && e.active),
   }), [equipments])
-
   function saveNewEquip(){
     if (!newEquip.code.trim()) return
     setEquipments(prev => [...prev, { id: uid(), code: newEquip.code.trim().toUpperCase(), stage: newEquip.stage, active: !!newEquip.active }])
@@ -339,7 +307,7 @@ export default function App(){
     setEquipModal(false)
   }
 
-  // ---------- Filtros & Agregações ----------
+  // ---- Filtros / agregações ----
   const filtered = useMemo(() => {
     const from = filters.from ? dayjs(filters.from) : null
     const to = filters.to ? dayjs(filters.to) : null
@@ -353,7 +321,6 @@ export default function App(){
     }).sort((a,b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0)
   }, [entries, filters])
 
-  // Somatórios por etapa (não somar juntas)
   const sums = useMemo(() => {
     const sum = (arr, fn) => arr.reduce((acc, x) => acc + (fn(x) || 0), 0)
     const britF = sum(filtered.filter(x => x.stage === 'Britagem'), x => x.tonnage)
@@ -366,7 +333,6 @@ export default function App(){
     return { britF, moagF, britHoje, moagHoje, moagMes }
   }, [filtered, entries])
 
-  // Charts (usam o período filtrado)
   const dailyStageBars = useMemo(() => {
     const map = new Map()
     for (const e of filtered){
@@ -410,89 +376,29 @@ export default function App(){
   const { data: moagemStack, equipList: moagemEquipList } = useMemo(()=>stackedByEquipment('Moagem'), [filtered])
   const { data: britagemStack, equipList: britagemEquipList } = useMemo(()=>stackedByEquipment('Britagem'), [filtered])
 
-  // ---------- PDF helpers ----------
+  // ---- PDF helpers ----
   async function exportHTMLToPDFPaginated(html, filename){
     const wrapper = document.createElement('div')
     wrapper.innerHTML = html
     document.body.appendChild(wrapper)
-
     const canvas = await html2canvas(wrapper, { scale: 2, backgroundColor: '#ffffff' })
     const img = canvas.toDataURL('image/png')
-
     const pdf = new jsPDF('p','mm','a4')
     const pdfW = pdf.internal.pageSize.getWidth()
     const pdfH = pdf.internal.pageSize.getHeight()
-
     const imgH = (canvas.height * pdfW) / canvas.width
     let heightLeft = imgH
     let position = 0
-
     pdf.addImage(img, 'PNG', 0, position, pdfW, imgH)
     heightLeft -= pdfH
-
     while (heightLeft > 0) {
       position = -(imgH - heightLeft)
       pdf.addPage()
       pdf.addImage(img, 'PNG', 0, position, pdfW, imgH)
       heightLeft -= pdfH
     }
-
     pdf.save(filename)
     document.body.removeChild(wrapper)
-  }
-
-  function renderDailyHTML(dateStr){
-    const data = entries.filter(e => e.date === dateStr)
-    const sum = (arr, fn) => arr.reduce((acc, x) => acc + (fn(x) || 0), 0)
-    const brit = sum(data.filter(x=>x.stage==='Britagem'), x=>x.tonnage)
-    const moag = sum(data.filter(x=>x.stage==='Moagem'), x=>x.tonnage)
-
-    const byEquip = {}
-    for(const e of data){
-      const k = `${e.stage} - ${cleanText(e.equipment||'N/D').toUpperCase()}`
-      byEquip[k] = (byEquip[k]||0) + (e.tonnage||0)
-    }
-
-    return `
-      <div style="font-family: Arial, sans-serif; padding: 12px; width: 820px;">
-        <h2>Relatório Diário – ${dayjs(dateStr).format('DD/MM/YYYY')}</h2>
-        <div><b>Prado Mineração</b></div>
-        <hr/>
-        <p><b>Britagem (t):</b> ${formatNumber(brit)} | <b>Moagem (t):</b> ${formatNumber(moag)}</p>
-        <h3 style="margin-top:12px;">Por Equipamento</h3>
-        <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse; width:100%;">
-          <tr><th>Etapa • Equipamento</th><th style="text-align:right">t</th></tr>
-          ${Object.entries(byEquip).map(([k,v])=>`<tr><td>${k}</td><td style="text-align:right">${formatNumber(v)}</td></tr>`).join('')}
-        </table>
-      </div>
-    `
-  }
-
-  function renderMonthlyHTML(ym){
-    const data = entries.filter(e => String(e.date).startsWith(ym))
-    const sum = (arr, fn) => arr.reduce((acc, x) => acc + (fn(x) || 0), 0)
-    const brit = sum(data.filter(x=>x.stage==='Britagem'), x=>x.tonnage)
-    const moag = sum(data.filter(x=>x.stage==='Moagem'), x=>x.tonnage)
-    const byDay = {}
-    for(const e of data){
-      if(!byDay[e.date]) byDay[e.date] = { Britagem:0, Moagem:0 }
-      byDay[e.date][e.stage] += e.tonnage||0
-    }
-    return `
-      <div style="font-family: Arial, sans-serif; padding: 12px; width: 840px;">
-        <h2>Relatório Mensal – ${dayjs(ym+'-01').format('MM/YYYY')}</h2>
-        <div><b>Prado Mineração</b></div>
-        <hr/>
-        <p><b>Britagem (t):</b> ${formatNumber(brit)} | <b>Moagem (t):</b> ${formatNumber(moag)}</p>
-        <h3 style="margin-top:12px;">Diário (Britagem x Moagem)</h3>
-        <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse; width:100%;">
-          <tr><th>Data</th><th style="text-align:right">Britagem (t)</th><th style="text-align:right">Moagem (t)</th></tr>
-          ${Object.entries(byDay).sort(([a],[b])=>a<b?-1:1).map(([d,v])=>
-            `<tr><td>${dayjs(d).format('DD/MM')}</td><td style="text-align:right">${formatNumber(v.Britagem)}</td><td style="text-align:right">${formatNumber(v.Moagem)}</td></tr>`
-          ).join('')}
-        </table>
-      </div>
-    `
   }
 
   function renderPeriodHTML(from, to){
@@ -521,12 +427,9 @@ export default function App(){
       </div>
     `
   }
-
-  async function exportDailyPDF(){ await exportHTMLToPDFPaginated(renderDailyHTML(reportDate), `relatorio_diario_${reportDate}.pdf`) }
-  async function exportMonthlyPDF(){ await exportHTMLToPDFPaginated(renderMonthlyHTML(reportMonth), `relatorio_mensal_${reportMonth}.pdf`) }
   async function exportPeriodPDF(){ await exportHTMLToPDFPaginated(renderPeriodHTML(filters.from, filters.to), `relatorio_periodo_${filters.from}_a_${filters.to}.pdf`) }
 
-  // Compartilhar (WhatsApp / Email)
+  // ---- Share helpers ----
   function downloadBlob(blob, filename){
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -581,7 +484,7 @@ export default function App(){
     })
   }
 
-  // ---------- QR ----------
+  // ---- QR ----
   async function openQR(){
     setQrOpen(true)
     setTimeout(initQR, 0)
@@ -612,18 +515,15 @@ export default function App(){
   }
   function closeQR(){
     const inst = qrInstanceRef.current
-    if (inst) {
-      inst.stop().then(() => inst.clear()).catch(()=>{})
-      qrInstanceRef.current = null
-    }
+    if (inst) { inst.stop().then(() => inst.clear()).catch(()=>{}); qrInstanceRef.current = null }
     setQrOpen(false)
   }
 
-  // ---------- Exportações ----------
+  // ---- Exportações CSV/JSON ----
   function exportCSV(){
-    const header = ['id','data','inicio','fim','turno','etapa','equipamento','toneladas','umidade_%','operador','observacoes','horas','t/h','paradas_min','causas','h_oper','t/h_oper','t/h_meta','Δ_vs_meta','teor_g_t','paradas_json','criado_em']
+    const header = ['id','user_id','data','inicio','fim','turno','etapa','equipamento','toneladas','umidade_%','operador','observacoes','horas','t/h','paradas_min','causas','h_oper','t/h_oper','t/h_meta','Δ_vs_meta','teor_g_t','paradas_json','criado_em']
     const rows = entries.map(e => [
-      e.id, e.date, e.start || '', e.end || '', e.shift || '', e.stage, e.equipment || '',
+      e.id, e.user_id || '', e.date, e.start || '', e.end || '', e.shift || '', e.stage, e.equipment || '',
       e.tonnage ?? '', e.moisture ?? '', e.operator || '', (e.notes || '').replaceAll('\n',' '),
       e.hours ?? '', e.tph ?? '', e.downtime_min ?? '', e.downtime_cause || '',
       e.op_hours ?? '', e.tph_operational ?? '', e.tph_target ?? '', e.tph_delta ?? '',
@@ -642,36 +542,14 @@ export default function App(){
   function importJSON(file){
     const reader = new FileReader()
     reader.onload = () => {
-      try {
-        const data = JSON.parse(reader.result)
-        if (!Array.isArray(data)) throw new Error('Formato inválido')
-        setEntries(data); setMsg('Backup importado com sucesso.')
-      } catch (e) { setMsg('Falha ao importar JSON.') }
+      try { const data = JSON.parse(reader.result); if (!Array.isArray(data)) throw new Error('Formato inválido'); setEntries(data); setMsg('Backup importado com sucesso.') }
+      catch { setMsg('Falha ao importar JSON.') }
     }
     reader.readAsText(file)
   }
 
-  // ---------- Resumo do Ouro ----------
-  const goldCalcPeriod = useMemo(() => {
-    const tons = entries.filter(e => String(e.date).startsWith(goldMonth) && e.stage === 'Moagem').reduce((a,x)=>a+(x.tonnage||0),0)
-    const kg = Number(goldKg || 0)
-    const gt = tons > 0 ? (kg*1000)/tons : 0
-    return { tons, kg, gt }
-  }, [entries, goldMonth, goldKg])
 
-  function saveGoldMonth(){
-    if (!goldMonth) return
-    const kg = Number(goldKg || 0)
-    const existing = goldRecords.find(r => r.period === goldMonth)
-    if (existing){
-      setGoldRecords(prev => prev.map(r => r.period === goldMonth ? { ...r, kg } : r))
-    } else {
-      setGoldRecords(prev => [...prev, { id: uid(), period: goldMonth, kg }])
-    }
-    setMsg('Resumo do ouro salvo para o mês.')
-  }
-
-  // ---------- UI ----------
+  // ---- UI ----
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <Message text={msg} onClose={() => setMsg('')} />
@@ -681,7 +559,7 @@ export default function App(){
           <div className="p-2 rounded-xl bg-slate-100"><Factory className="h-6 w-6" /></div>
           <div className="flex-1">
             <h1 className="text-xl md:text-2xl font-bold leading-tight">Mineração – Lançamentos & Dash</h1>
-            <p className="text-sm text-slate-500">Britagem e Moagem separados · Período livre · PWA offline · QR · PDF · Ouro · Synced</p>
+            <p className="text-sm text-slate-500">Britagem e Moagem separados · Período livre · PWA offline · QR · PDF · Synced</p>
           </div>
           <div className="flex items-center gap-2">
             <button className="px-3 py-2 border rounded-md text-sm hover:bg-slate-50" onClick={exportCSV}><Download className="inline mr-2 h-4 w-4"/>CSV</button>
@@ -719,7 +597,7 @@ export default function App(){
       </header>
 
       <main className="mx-auto max-w-7xl p-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Formulário */}
+        {/* Form */}
         <div className="rounded-2xl border bg-white shadow-sm p-4">
           <div className="text-lg font-semibold flex items-center gap-2 mb-3"><Plus className="h-5 w-5"/> Novo Lançamento</div>
           <form onSubmit={handleSubmit} className="space-y-3">
@@ -743,20 +621,18 @@ export default function App(){
               <div><label className="text-sm">Toneladas (t)</label><input type="number" step="0.01" inputMode="decimal" className="w-full px-3 py-2 border rounded-md" value={form.tonnage} onChange={e=>setForm({...form, tonnage:e.target.value})} required /></div>
               <div><label className="text-sm">Umidade (%)</label><input type="number" step="0.1" inputMode="decimal" className="w-full px-3 py-2 border rounded-md" value={form.moisture} onChange={e=>setForm({...form, moisture:e.target.value})} /></div>
               <div className="col-span-2">
-                <label className="text-sm font-medium flex items-center gap-2"><MinusCircle className="h-4 w-4"/> Paradas (somatório automático)</label>
+                <label className="text-sm font-medium flex items-center gap-2"><MinusCircle className="h-4 w-4"/> Paradas</label>
                 {(form.stops || []).map(s => (
                   <div key={s.id} className="mt-2 grid grid-cols-8 gap-2 items-end">
                     <div className="col-span-2"><label className="text-xs text-slate-500">De</label><input type="time" className="w-full px-2 py-2 border rounded-md" value={s.from} onChange={e=>updateStop(s.id,{from:e.target.value})}/></div>
                     <div className="col-span-2"><label className="text-xs text-slate-500">Até</label><input type="time" className="w-full px-2 py-2 border rounded-md" value={s.to} onChange={e=>updateStop(s.id,{to:e.target.value})}/></div>
                     <div className="col-span-3"><label className="text-xs text-slate-500">Causa</label><input className="w-full px-2 py-2 border rounded-md" value={s.cause} onChange={e=>updateStop(s.id,{cause:e.target.value})}/></div>
-                    <div className="col-span-1 text-right">
-                      <button type="button" className="px-2 py-2 border rounded-md hover:bg-slate-50" onClick={()=>removeStop(s.id)}>Remover</button>
-                    </div>
+                    <div className="col-span-1 text-right"><button type="button" className="px-2 py-1 border rounded-md hover:bg-slate-50" onClick={()=>removeStop(s.id)}>Remover</button></div>
                   </div>
                 ))}
                 <div className="mt-2 flex items-center justify-between text-sm">
                   <button type="button" onClick={addStop} className="px-3 py-2 border rounded-md hover:bg-slate-50"><Plus className="inline h-4 w-4 mr-1"/>Adicionar parada</button>
-                  <div className="text-slate-600">Total paradas: <b>{formatNumber(totalStopsMin,0)} min</b></div>
+                  <div className="text-slate-600">Total: <b>{formatNumber(totalStopsMin,0)} min</b></div>
                 </div>
               </div>
               <div className="col-span-2"><label className="text-sm">Observações</label><textarea rows="3" className="w-full px-3 py-2 border rounded-md" value={form.notes} onChange={e=>setForm({...form, notes:e.target.value})}></textarea></div>
@@ -790,7 +666,6 @@ export default function App(){
 
         {/* Dash & Listas */}
         <div className="lg:col-span-2 space-y-4">
-          {/* KPIs */}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <KPI icon={<Hammer className="h-5 w-5"/>} title="Britagem (filtro)" value={`${formatNumber(sums.britF)} t`} />
             <KPI icon={<Hammer className="h-5 w-5"/>} title="Moagem (filtro)" value={`${formatNumber(sums.moagF)} t`} />
@@ -799,7 +674,6 @@ export default function App(){
             <KPI icon={<CalendarRange className="h-5 w-5"/>} title="Mês – Moagem" value={`${formatNumber(sums.moagMes)} t`} />
           </div>
 
-          {/* Filtros período + atalhos */}
           <div className="rounded-2xl border bg-white shadow-sm">
             <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Filter className="h-5 w-5"/> Período do Dashboard</div>
             <div className="px-4 pb-3 grid md:grid-cols-7 gap-3">
@@ -817,9 +691,8 @@ export default function App(){
             </div>
           </div>
 
-          {/* Gráfico Produção diária – Moagem × Britagem */}
           <div className="rounded-2xl border bg-white shadow-sm">
-            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> Produção diária – Moagem × Britagem (período aplicado)</div>
+            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> Produção diária – Moagem × Britagem</div>
             <div className="h-72 px-2 pb-4">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={dailyStageBars} margin={{ left: 4, right: 16, bottom: 8 }}>
@@ -832,9 +705,8 @@ export default function App(){
             </div>
           </div>
 
-          {/* t/h operacional diário – linhas */}
           <div className="rounded-2xl border bg-white shadow-sm">
-            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> t/h operacional (período aplicado)</div>
+            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> t/h operacional</div>
             <div className="h-72 px-2 pb-4">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={tphOperationalSeries} margin={{ left: 4, right: 16, bottom: 8 }}>
@@ -847,35 +719,6 @@ export default function App(){
             </div>
           </div>
 
-          {/* Empilhados por equipamento */}
-          <div className="grid md:grid-cols-2 gap-4">
-            <div className="rounded-2xl border bg-white shadow-sm">
-              <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> Moagem por equipamento</div>
-              <div className="h-72 px-2 pb-4">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={moagemStack} margin={{ left: 4, right: 16, bottom: 8 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="date" /><YAxis /><Tooltip /><Legend />
-                    {moagemEquipList.map((eq, i)=>(<Bar key={eq} dataKey={eq} stackId="moag" fill={colorForEquipment(eq, i)} />))}
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-            <div className="rounded-2xl border bg-white shadow-sm">
-              <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> Britagem por equipamento</div>
-              <div className="h-72 px-2 pb-4">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={britagemStack} margin={{ left: 4, right: 16, bottom: 8 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="date" /><YAxis /><Tooltip /><Legend />
-                    {britagemEquipList.map((eq, i)=>(<Bar key={eq} dataKey={eq} stackId="brit" fill={colorForEquipment(eq, i)} />))}
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          </div>
-
-          {/* Lista + PDF de período */}
           <div className="rounded-2xl border bg-white shadow-sm">
             <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Filter className="h-5 w-5"/> Lançamentos (período aplicado)</div>
             <div className="px-4 pb-3 flex items-center gap-2">
@@ -905,9 +748,7 @@ export default function App(){
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.length === 0 && (
-                    <tr><td colSpan="15" className="py-8 text-center text-slate-400">Sem lançamentos para os filtros aplicados.</td></tr>
-                  )}
+                  {filtered.length === 0 && (<tr><td colSpan="15" className="py-8 text-center text-slate-400">Sem lançamentos para os filtros aplicados.</td></tr>)}
                   {filtered.map(e => {
                     const h = e.hours ?? parseTimeToHours(e.start, e.end)
                     const opH = e.op_hours ?? Math.max(0, h - ((e.downtime_min||0)/60))
@@ -944,70 +785,16 @@ export default function App(){
             </div>
           </div>
 
-          {/* RESUMO DO OURO */}
+          {/* (Opcional) Resumo do Ouro – mantido local neste arquivo */}
           <div className="rounded-2xl border bg-white shadow-sm">
             <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Star className="h-5 w-5"/> Resumo do Ouro</div>
             <div className="px-4 pb-4 grid md:grid-cols-5 gap-3">
               <div><label className="text-sm">Mês</label><input type="month" className="w-full px-3 py-2 border rounded-md" value={goldMonth} onChange={e=>setGoldMonth(e.target.value)} /></div>
               <div><label className="text-sm">Ouro recuperado (kg)</label><input type="number" step="0.001" className="w-full px-3 py-2 border rounded-md" value={goldKg} onChange={e=>setGoldKg(e.target.value)} /></div>
               <div className="md:col-span-3 flex items-end gap-2">
-                <div className="px-3 py-2 border rounded-md text-sm">Moagem do mês: <b>{formatNumber(goldCalcPeriod.tons)}</b> t</div>
-                <div className="px-3 py-2 border rounded-md text-sm">Teor médio: <b>{formatNumber(goldCalcPeriod.gt)}</b> g/t</div>
+                <div className="px-3 py-2 border rounded-md text-sm">Moagem do mês: <b>{formatNumber(useMemo(()=>entries.filter(e => String(e.date).startsWith(goldMonth) && e.stage === 'Moagem').reduce((a,x)=>a+(x.tonnage||0),0),[entries,goldMonth]))}</b> t</div>
+                <div className="px-3 py-2 border rounded-md text-sm">Teor médio: <b>{formatNumber(useMemo(()=>{ const tons = entries.filter(e => String(e.date).startsWith(goldMonth) && e.stage === 'Moagem').reduce((a,x)=>a+(x.tonnage||0),0); const kg = Number(goldKg||0); return tons>0?(kg*1000)/tons:0 },[entries,goldMonth,goldKg]))}</b> g/t</div>
                 <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={saveGoldMonth}><Save className="inline h-4 w-4 mr-1"/>Salvar mês</button>
-              </div>
-            </div>
-            {goldRecords.length>0 && (
-              <div className="px-4 pb-4">
-                <div className="text-sm font-medium mb-2">Histórico</div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="text-left text-slate-500"><tr className="border-b"><th className="py-2 pr-3">Mês</th><th className="py-2 pr-3 text-right">Ouro (kg)</th><th className="py-2 pr-3 text-right">Moagem (t)</th><th className="py-2 pr-3 text-right">g/t</th></tr></thead>
-                    <tbody>
-                      {goldRecords.sort((a,b)=>a.period<b.period?-1:1).map(r => {
-                        const tons = entries.filter(e => String(e.date).startsWith(r.period) && e.stage === 'Moagem').reduce((a,x)=>a+(x.tonnage||0),0)
-                        const gt = tons>0 ? (r.kg*1000)/tons : 0
-                        return (<tr key={r.id} className="border-b">
-                          <td className="py-2 pr-3 whitespace-nowrap">{dayjs(r.period+'-01').format('MM/YYYY')}</td>
-                          <td className="py-2 pr-3 text-right">{formatNumber(r.kg,3)}</td>
-                          <td className="py-2 pr-3 text-right">{formatNumber(tons)}</td>
-                          <td className="py-2 pr-3 text-right">{formatNumber(gt)}</td>
-                        </tr>)
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* CONFIGURAÇÕES: Equipamentos & Metas */}
-          <div className="rounded-2xl border bg-white shadow-sm">
-            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Settings className="h-5 w-5"/> Configurações</div>
-            <div className="px-4 pb-4 grid md:grid-cols-2 gap-6">
-              <div>
-                <div className="font-medium mb-2 flex items-center gap-2"><Wrench className="h-4 w-4"/> Equipamentos</div>
-                <div className="space-y-2">
-                  {equipments.map(eq => (
-                    <div key={eq.id} className="flex items-center gap-2 border rounded-md px-2 py-1">
-                      <span className="text-sm w-28">{eq.code}</span>
-                      <span className="text-xs text-slate-500 w-24">{eq.stage}</span>
-                      <label className="text-xs ml-auto flex items-center gap-1">
-                        <input type="checkbox" checked={eq.active} onChange={e=>setEquipments(prev=>prev.map(x=>x.id===eq.id?{...x,active:e.target.checked}:x))}/>
-                        ativo
-                      </label>
-                      <button className="px-2 py-1 border rounded-md hover:bg-slate-50 text-xs" onClick={()=>setEquipments(prev=>prev.filter(x=>x.id!==eq.id))}>Remover</button>
-                    </div>
-                  ))}
-                  <button className="px-3 py-2 border rounded-md hover:bg-slate-50 text-sm" onClick={()=>setEquipModal(true)}><Plus className="inline h-4 w-4 mr-1"/>Novo equipamento</button>
-                </div>
-              </div>
-              <div>
-                <div className="font-medium mb-2 flex items-center gap-2"><Target className="h-4 w-4"/> Metas fixas (t/h)</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div><label className="text-sm">Britagem</label><input type="number" step="0.01" className="w-full px-3 py-2 border rounded-md" value={targets.Britagem} onChange={e=>setTargets(t=>({...t, Britagem: Number(e.target.value||0)}))}/></div>
-                  <div><label className="text-sm">Moagem</label><input type="number" step="0.01" className="w-full px-3 py-2 border rounded-md" value={targets.Moagem} onChange={e=>setTargets(t=>({...t, Moagem: Number(e.target.value||0)}))}/></div>
-                </div>
-                <p className="text-xs text-slate-500 mt-2">Essas metas preenchem automaticamente o campo do formulário (pode destravar e editar por lançamento).</p>
               </div>
             </div>
           </div>
@@ -1038,7 +825,7 @@ export default function App(){
           <div className="bg-white rounded-xl shadow-lg p-4 w-full max-w-sm">
             <div className="flex items-center justify-between mb-2">
               <div className="font-semibold">Ler QR – Equipamento</div>
-              <button onClick={closeQR} className="px-2 py-1 border rounded hover:bg-slate-50">Fechar</button>
+              <button onClick={()=>setQrOpen(false)} className="px-2 py-1 border rounded hover:bg-slate-50">Fechar</button>
             </div>
             <div id="qr-reader" className="w-full h-[320px] bg-black rounded-md" />
             <p className="text-xs text-slate-500 mt-2">Dica: mire o QR da etiqueta. Requer permissão da câmera (HTTPS).</p>
@@ -1046,8 +833,8 @@ export default function App(){
         </div>
       )}
 
-      <footer className="mx-auto max-w-7xl px-4 pb-8 pt-2 text-xs text-slate-500 space-y-1">
-        <div><b>Período livre:</b> ajuste "De/Até" para ver os gráficos de 01–15, 16–31 etc. Gere o <b>PDF do Período</b> nos botões da lista.</div>
+      <footer className="mx-auto max-w-7xl px-4 pb-8 pt-2 text-xs text-slate-500">
+        <div><b>Período livre:</b> ajuste "De/Até" para ver os gráficos no intervalo desejado. Gere o <b>PDF do Período</b> para compartilhar.</div>
       </footer>
     </div>
   )
