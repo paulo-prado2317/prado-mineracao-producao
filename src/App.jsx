@@ -13,10 +13,6 @@ import {
   Bar, ComposedChart, Line
 } from 'recharts'
 
-/* -------------------------------------------------------------------------- */
-/*                      Pequenos componentes utilitários                      */
-/* -------------------------------------------------------------------------- */
-
 function KPI({ icon, title, value }) {
   return (
     <div className="rounded-xl border bg-white p-3 shadow-sm">
@@ -41,10 +37,6 @@ function Message({ text, onClose }) {
     </div>
   )
 }
-
-/* -------------------------------------------------------------------------- */
-/*                               Constantes/Utils                              */
-/* -------------------------------------------------------------------------- */
 
 const STORAGE_KEY = 'prado_mineracao_producao_v6'
 const STORAGE_PENDING = 'prado_mineracao_pending_queue_v4'
@@ -81,69 +73,50 @@ function formatNumber(n, frac=2){
   return new Intl.NumberFormat('pt-BR', { maximumFractionDigits: frac }).format(Number(n))
 }
 
-// Cores fixas por equipamento + paleta
 const EQUIP_COLORS = { 'MM-01': '#facc15', 'MM-02': '#f97316', 'BT-01': '#22c55e' }
 const PALETTE = ['#60a5fa','#a78bfa','#34d399','#f472b6','#f59e0b','#10b981','#ef4444','#14b8a6','#8b5cf6','#e11d48']
 const colorForEquipment = (name, idx) => EQUIP_COLORS[(name||'').toUpperCase()] || PALETTE[idx % PALETTE.length]
 
-/* -------------------------------------------------------------------------- */
-/*                                 Supabase                                    */
-/* -------------------------------------------------------------------------- */
-
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || ''
 const SUPABASE_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
 const supabase = (SUPABASE_URL && SUPABASE_ANON) ? createClient(SUPABASE_URL, SUPABASE_ANON) : null
-
-/* -------------------------------------------------------------------------- */
-/*                                    App                                      */
-/* -------------------------------------------------------------------------- */
+const APP_NAME = 'Mineração CANGAS II'
+const GROUP_ID = import.meta.env.VITE_GROUP_ID || null  // defina o ID do grupo para dados compartilhados
 
 export default function App(){
-  // Sessão & UI
   const [session, setSession] = useState(null)
   const [isSyncing, setIsSyncing] = useState(false)
   const [msg, setMsg] = useState('')
   const emailRef = useRef(null)
 
-  // Dados
   const today = dayjs().format('YYYY-MM-DD')
   const [entries, setEntries] = useState([])
 
-  // Formulário
   const [form, setForm] = useState({
     date: today, start: '07:00', end: '19:00', shift: 'Diurno',
     stage: 'Britagem', equipment: '', tonnage: '', moisture: '',
     operator: '', notes: '',
-    stops: [{ id: uid(), from: '', to: '', cause: '' }], // paradas
+    stops: [{ id: uid(), from: '', to: '', cause: '' }],
     tph_target: '', grade: '',
   })
   const [allowEditTarget, setAllowEditTarget] = useState(false)
 
-  // Filtros e relatórios
   const [filters, setFilters] = useState({ from: today, to: today, stage: 'Todos', query: '' })
   const [quickMonth, setQuickMonth] = useState(dayjs().format('YYYY-MM'))
-  const [reportDate, setReportDate] = useState(today)
-  const [reportMonth, setReportMonth] = useState(dayjs().format('YYYY-MM'))
 
-  // Equipamentos & metas
-  const [equipments, setEquipments] = useState([]) // {id, code, stage, active}
+  const [equipments, setEquipments] = useState([])
   const [equipModal, setEquipModal] = useState(false)
   const [newEquip, setNewEquip] = useState({ code: '', stage: 'Britagem', active: true })
   const [targets, setTargets] = useState({ Britagem: 0, Moagem: 0 })
 
-  // Ouro (mensal)
-  const [goldRecords, setGoldRecords] = useState([]) // {id, period:'YYYY-MM', kg:number}
+  const [goldRecords, setGoldRecords] = useState([])
   const [goldMonth, setGoldMonth] = useState(dayjs().format('YYYY-MM'))
   const [goldKg, setGoldKg] = useState('')
 
-  // QR + realtime
   const [qrOpen, setQrOpen] = useState(false)
   const qrInstanceRef = useRef(null)
   const realtimeRef = useRef(null)
 
-  /* ------------------------------- Carregamentos ------------------------------ */
-
-  // LocalStorage → estado
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY); if (raw) setEntries(JSON.parse(raw))
@@ -152,13 +125,11 @@ export default function App(){
       const gr = localStorage.getItem(STORAGE_GOLD); if (gr) setGoldRecords(JSON.parse(gr))
     } catch {}
   }, [])
-  // Estado → LocalStorage
   useEffect(()=>{ localStorage.setItem(STORAGE_KEY, JSON.stringify(entries)) }, [entries])
   useEffect(()=>{ localStorage.setItem(STORAGE_EQUIP, JSON.stringify(equipments)) }, [equipments])
   useEffect(()=>{ localStorage.setItem(STORAGE_TARGETS, JSON.stringify(targets)) }, [targets])
   useEffect(()=>{ localStorage.setItem(STORAGE_GOLD, JSON.stringify(goldRecords)) }, [goldRecords])
 
-  // Equipamentos padrão
   useEffect(() => {
     if (equipments.length === 0){
       setEquipments([
@@ -169,7 +140,6 @@ export default function App(){
     }
   }, [equipments.length])
 
-  // Auth
   useEffect(() => {
     if (!supabase) return
     supabase.auth.getSession().then(({ data }) => setSession(data.session || null))
@@ -177,13 +147,27 @@ export default function App(){
     return () => { sub?.subscription.unsubscribe() }
   }, [])
 
-  /* ---------------------------- Cloud sync helpers ---------------------------- */
-
   function queuePending(op){
+    if (op?.payload) op.payload = normalizePayload(op.payload)
     const raw = localStorage.getItem(STORAGE_PENDING)
     const list = raw ? JSON.parse(raw) : []
     list.push(op)
     localStorage.setItem(STORAGE_PENDING, JSON.stringify(list))
+  }
+
+  function normalizePayload(p){
+    const q = { ...p }
+    if (typeof q.stops_json === 'string') {
+      try { q.stops_json = JSON.parse(q.stops_json) } catch { q.stops_json = [] }
+    }
+    const numKeys = ['tonnage','moisture','hours','tph','downtime_min','op_hours','tph_operational','tph_target','tph_delta','grade']
+    for (const k of numKeys) {
+      if (q[k] === '' || q[k] === undefined || q[k] === null) { delete q[k]; continue }
+      const v = Number(q[k])
+      if (Number.isNaN(v) || !Number.isFinite(v)) { delete q[k] } else { q[k] = v }
+    }
+    Object.keys(q).forEach(k => { if (q[k] === undefined || (typeof q[k] === 'number' && Number.isNaN(q[k]))) delete q[k] })
+    return q
   }
 
   async function fetchEntriesFromCloud() {
@@ -191,16 +175,13 @@ export default function App(){
     const { data, error } = await supabase
       .from('production_entries')
       .select('*')
-      .eq('user_id', session.user.id)
+      .eq(GROUP_ID ? 'group_id' : 'user_id', GROUP_ID ? GROUP_ID : session.user.id)
       .order('date', { ascending: true })
-    if (error) { setMsg('Falha ao buscar da nuvem.'); return }
+    if (error) { setMsg('Falha ao buscar da nuvem: ' + (error.message || '')); return }
     setEntries((prev) => {
       const map = new Map(prev.map(e => [e.id, e]))
       for (const e of (data || [])) map.set(e.id, e)
-      return Array.from(map.values()).sort((a,b) =>
-        a.date < b.date ? -1 : a.date > b.date ? 1 :
-        String(a.createdAt||'').localeCompare(String(b.createdAt||''))
-      )
+      return Array.from(map.values()).sort((a,b) => a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.id).localeCompare(String(b.id)))
     })
   }
 
@@ -208,11 +189,7 @@ export default function App(){
     if (!supabase || !session?.user || realtimeRef.current) return
     realtimeRef.current = supabase
       .channel('prod_entries')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'production_entries', filter: `user_id=eq.${session.user.id}` },
-        () => { fetchEntriesFromCloud() }
-      )
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_entries', filter: GROUP_ID ? `group_id=eq.${GROUP_ID}` : `user_id=eq.${session.user.id}` }, () => { fetchEntriesFromCloud() })
       .subscribe()
   }
 
@@ -225,18 +202,22 @@ export default function App(){
     try{
       for (const op of list){
         if (op.type === 'upsert') {
-          const payload = { ...op.payload, user_id: op.payload.user_id || session.user.id }
-          const { error } = await supabase.from('production_entries').upsert(payload)
-          if (error) throw error
+          const payload = normalizePayload({ ...op.payload, user_id: op.payload.user_id || session.user.id, group_id: GROUP_ID || op.payload.group_id })
+          const up = await supabase.from('production_entries').upsert(payload, { onConflict: 'id' })
+          if (up.error) {
+            const ins = await supabase.from('production_entries').insert(payload)
+            if (ins.error && ins.status !== 409) throw ins.error
+          }
         } else if (op.type === 'delete') {
-          const { error } = await supabase.from('production_entries').delete().eq('id', op.id).eq('user_id', session.user.id)
+          const { error } = await supabase.from('production_entries').delete().eq('id', op.id)
           if (error) throw error
         }
       }
       localStorage.removeItem(STORAGE_PENDING)
       setMsg('Pendências sincronizadas.')
     } catch (e){
-      setMsg('Erro ao sincronizar pendências. Verifique o Supabase.')
+      console.error('Supabase sync error:', e)
+      setMsg('Erro ao sincronizar pendências: ' + (e?.message || e?.error_description || '400'))
     } finally {
       setIsSyncing(false)
       await fetchEntriesFromCloud()
@@ -261,8 +242,6 @@ export default function App(){
       }
     }
   }, [])
-
-  /* -------------------------------- Lançamento ------------------------------- */
 
   const totalStopsMin = useMemo(() => (form.stops||[]).reduce((acc,s)=>acc+(diffMinutes(s.from,s.to)||0),0), [form.stops])
 
@@ -294,7 +273,8 @@ export default function App(){
     const tph = hours > 0 ? +(tonnage / hours).toFixed(2) : undefined
     const tphOperational = opHours > 0 ? +(tonnage / opHours).toFixed(2) : undefined
 
-    const payload = {
+    const payload = normalizePayload({
+      group_id: GROUP_ID,
       id: uid(),
       user_id: session?.user?.id || null,
       date: form.date, start: form.start, end: form.end, shift: form.shift, stage: form.stage,
@@ -307,24 +287,27 @@ export default function App(){
       tph_target: form.tph_target !== '' ? Number(form.tph_target) : undefined,
       tph_delta: (form.tph_target && tphOperational) ? +(tphOperational - Number(form.tph_target)).toFixed(2) : undefined,
       grade: form.grade !== '' ? Number(form.grade) : undefined,
-      stops_json: JSON.stringify(form.stops || []),
-      createdAt: new Date().toISOString(),
-    }
+      stops_json: form.stops || []
+    })
 
     setEntries(prev => [...prev, payload])
 
     try {
       if (supabase && session?.user) {
-        const { error } = await supabase.from('production_entries').upsert(payload)
-        if (error) throw error
+        const up = await supabase.from('production_entries').upsert(payload, { onConflict: 'id' })
+        if (up.error) {
+          const ins = await supabase.from('production_entries').insert(payload)
+          if (ins.error && ins.status !== 409) throw ins.error
+        }
         await fetchEntriesFromCloud()
       } else {
         queuePending({ type: 'upsert', payload })
       }
       setMsg('Lançamento adicionado.')
-    } catch {
+    } catch (e) {
+      console.error('Supabase upsert error:', e)
       queuePending({ type: 'upsert', payload })
-      setMsg('Sem conexão. Salvo localmente para sincronizar depois.')
+      setMsg('Erro ao salvar no Supabase: ' + (e?.message || e?.error_description || '400') + ' — salvo offline para sincronizar depois.')
     }
 
     resetForm()
@@ -334,38 +317,40 @@ export default function App(){
     setEntries(prev => prev.filter(x => x.id !== id))
     try {
       if (supabase && session?.user) {
-        const { error } = await supabase.from('production_entries').delete().eq('id', id).eq('user_id', session.user.id)
+        const { error } = await supabase.from('production_entries').delete().eq('id', id)
         if (error) throw error
         await fetchEntriesFromCloud()
       } else {
         queuePending({ type: 'delete', id })
       }
       setMsg('Lançamento removido.')
-    } catch {
+    } catch (e) {
       queuePending({ type: 'delete', id })
-      setMsg('Sem conexão. Remoção pendente para sincronizar.')
+      setMsg('Erro ao remover no Supabase: ' + (e?.message || e?.error_description || '400') + ' — remoção pendente.')
     }
   }
-
-  /* ------------------------------ Filtros & KPIs ----------------------------- */
 
   const equipByStage = useMemo(() => ({
     Britagem: equipments.filter(e => e.stage === 'Britagem' && e.active),
     Moagem: equipments.filter(e => e.stage === 'Moagem' && e.active),
   }), [equipments])
 
+  const [filtersState, setFiltersState] = useState(null)
+  useEffect(() => { setFiltersState(filters) }, [filters])
+
   const filtered = useMemo(() => {
-    const from = filters.from ? dayjs(filters.from) : null
-    const to = filters.to ? dayjs(filters.to) : null
+    const f = filtersState || filters
+    const from = f.from ? dayjs(f.from) : null
+    const to = f.to ? dayjs(f.to) : null
     return entries.filter((e) => {
       const d = dayjs(e.date)
       const matchDate = (!from || !d.isBefore(from)) && (!to || !d.isAfter(to))
-      const matchStage = filters.stage === 'Todos' || e.stage === filters.stage
-      const q = (filters.query || '').toLowerCase()
+      const matchStage = f.stage === 'Todos' || e.stage === f.stage
+      const q = (f.query || '').toLowerCase()
       const matchQ = !q || [e.operator, e.equipment, e.notes, e.shift].some(x => (x || '').toLowerCase().includes(q))
       return matchDate && matchStage && matchQ
-    }).sort((a,b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0)
-  }, [entries, filters])
+    }).sort((a,b) => a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.id).localeCompare(String(b.id)))
+  }, [entries, filtersState])
 
   const sums = useMemo(() => {
     const sum = (arr, fn) => arr.reduce((acc, x) => acc + (fn(x) || 0), 0)
@@ -378,8 +363,6 @@ export default function App(){
     const moagMes = sum(entries.filter(x => String(x.date).startsWith(monthStr) && x.stage === 'Moagem'), x => x.tonnage)
     return { britF, moagF, britHoje, moagHoje, moagMes }
   }, [filtered, entries])
-
-  /* ---------------------------------- Charts --------------------------------- */
 
   const dailyStageBars = useMemo(() => {
     const map = new Map()
@@ -424,8 +407,6 @@ export default function App(){
   const { data: moagemStack, equipList: moagemEquipList } = useMemo(()=>stackedByEquipment('Moagem'), [filtered])
   const { data: britagemStack, equipList: britagemEquipList } = useMemo(()=>stackedByEquipment('Britagem'), [filtered])
 
-  /* ------------------------------- PDF Helpers ------------------------------- */
-
   async function exportHTMLToPDFPaginated(html, filename){
     const wrapper = document.createElement('div')
     wrapper.innerHTML = html
@@ -469,7 +450,7 @@ export default function App(){
     return `
       <div style="font-family: Arial, sans-serif; padding: 12px; width: 840px;">
         <h2>Relatório do Período – ${dayjs(from).format('DD/MM/YYYY')} a ${dayjs(to).format('DD/MM/YYYY')}</h2>
-        <div><b>Prado Mineração</b></div>
+        <div><b>${APP_NAME}</b></div>
         <hr/>
         <p><b>Britagem (t):</b> ${formatNumber(brit)} | <b>Moagem (t):</b> ${formatNumber(moag)}</p>
         <h3 style="margin-top:12px;">Diário (Britagem x Moagem)</h3>
@@ -483,8 +464,6 @@ export default function App(){
     `
   }
   async function exportPeriodPDF(){ await exportHTMLToPDFPaginated(renderPeriodHTML(filters.from, filters.to), `relatorio_periodo_${filters.from}_a_${filters.to}.pdf`) }
-
-  /* ------------------------------ Compartilhamento ---------------------------- */
 
   function downloadBlob(blob, filename){
     const url = URL.createObjectURL(blob)
@@ -540,8 +519,6 @@ export default function App(){
     })
   }
 
-  /* ----------------------------------- QR ----------------------------------- */
-
   async function openQR(){
     setQrOpen(true)
     setTimeout(initQR, 0)
@@ -576,16 +553,14 @@ export default function App(){
     setQrOpen(false)
   }
 
-  /* --------------------------- Exportações CSV/JSON -------------------------- */
-
   function exportCSV(){
-    const header = ['id','user_id','data','inicio','fim','turno','etapa','equipamento','toneladas','umidade_%','operador','observacoes','horas','t/h','paradas_min','causas','h_oper','t/h_oper','t/h_meta','Δ_vs_meta','teor_g_t','paradas_json','criado_em']
+    const header = ['id','user_id','group_id','data','inicio','fim','turno','etapa','equipamento','toneladas','umidade_%','operador','observacoes','horas','t/h','paradas_min','causas','h_oper','t/h_oper','t/h_meta','Δ_vs_meta','teor_g_t','paradas_json']
     const rows = entries.map(e => [
-      e.id, e.user_id || '', e.date, e.start || '', e.end || '', e.shift || '', e.stage, e.equipment || '',
+      e.id, e.user_id || '', e.group_id || '', e.date, e.start || '', e.end || '', e.shift || '', e.stage, e.equipment || '',
       e.tonnage ?? '', e.moisture ?? '', e.operator || '', (e.notes || '').replaceAll('\n',' '),
       e.hours ?? '', e.tph ?? '', e.downtime_min ?? '', e.downtime_cause || '',
       e.op_hours ?? '', e.tph_operational ?? '', e.tph_target ?? '', e.tph_delta ?? '',
-      e.grade ?? '', e.stops_json || '[]', e.createdAt || ''
+      e.grade ?? '', JSON.stringify(e.stops_json ?? [])
     ])
     const csv = [header, ...rows].map(r => r.map(c => c==null? '' : String(c)).map(c => `"${c.replaceAll('"','""')}"`).join(',')).join('\n')
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
@@ -606,8 +581,6 @@ export default function App(){
     reader.readAsText(file)
   }
 
-  /* ------------------------------ Resumo do Ouro ----------------------------- */
-
   const goldCalcPeriod = useMemo(() => {
     const tons = entries.filter(e => String(e.date).startsWith(goldMonth) && e.stage === 'Moagem').reduce((a,x)=>a+(x.tonnage||0),0)
     const kg = Number(goldKg || 0)
@@ -627,8 +600,6 @@ export default function App(){
     setMsg('Resumo do ouro salvo para o mês.')
   }
 
-  /* ----------------------------------- UI ----------------------------------- */
-
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <Message text={msg} onClose={() => setMsg('')} />
@@ -637,7 +608,7 @@ export default function App(){
         <div className="mx-auto max-w-7xl px-4 py-3 flex items-center gap-3">
           <div className="p-2 rounded-xl bg-slate-100"><Factory className="h-6 w-6" /></div>
           <div className="flex-1">
-            <h1 className="text-xl md:text-2xl font-bold leading-tight">Mineração – Lançamentos & Dash</h1>
+            <h1 className="text-xl md:text-2xl font-bold leading-tight">{APP_NAME} – Lançamentos & Dash</h1>
             <p className="text-sm text-slate-500">Britagem e Moagem separados · Período livre · PWA offline · QR · PDF · Synced</p>
           </div>
           <div className="flex items-center gap-2">
@@ -655,7 +626,7 @@ export default function App(){
           {session?.user ? (
             <div className="text-sm text-slate-600 flex items-center gap-3">
               <Database className="h-4 w-4"/>
-              <span>Conectado: <b>{session.user.email || session.user.id}</b></span>
+              <span>Conectado: <b>{session.user.email || session.user.id}</b>{GROUP_ID ? <span className="ml-2 px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-xs">Grupo</span> : null}</span>
               <button className="px-3 py-2 border rounded-md text-sm hover:bg-slate-50" onClick={async()=>{ await supabase.auth.signOut(); setSession(null) }}><LogOut className="inline mr-2 h-4 w-4"/>Sair</button>
             </div>
           ) : (
@@ -676,7 +647,6 @@ export default function App(){
       </header>
 
       <main className="mx-auto max-w-7xl p-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Formulário */}
         <div className="rounded-2xl border bg-white shadow-sm p-4">
           <div className="text-lg font-semibold flex items-center gap-2 mb-3"><Plus className="h-5 w-5"/> Novo Lançamento</div>
           <form onSubmit={handleSubmit} className="space-y-3">
@@ -745,9 +715,7 @@ export default function App(){
           </form>
         </div>
 
-        {/* Dash & Listas */}
         <div className="lg:col-span-2 space-y-4">
-          {/* KPIs */}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <KPI icon={<Hammer className="h-5 w-5"/>} title="Britagem (filtro)" value={`${formatNumber(sums.britF)} t`} />
             <KPI icon={<Hammer className="h-5 w-5"/>} title="Moagem (filtro)" value={`${formatNumber(sums.moagF)} t`} />
@@ -756,7 +724,6 @@ export default function App(){
             <KPI icon={<CalendarRange className="h-5 w-5"/>} title="Mês – Moagem" value={`${formatNumber(sums.moagMes)} t`} />
           </div>
 
-          {/* Filtros período + atalhos */}
           <div className="rounded-2xl border bg-white shadow-sm">
             <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Filter className="h-5 w-5"/> Período do Dashboard</div>
             <div className="px-4 pb-3 grid md:grid-cols-7 gap-3">
@@ -774,7 +741,6 @@ export default function App(){
             </div>
           </div>
 
-          {/* Gráfico Produção diária – Moagem × Britagem */}
           <div className="rounded-2xl border bg-white shadow-sm">
             <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> Produção diária – Moagem × Britagem</div>
             <div className="h-72 px-2 pb-4">
@@ -789,22 +755,20 @@ export default function App(){
             </div>
           </div>
 
-          {/* t/h operacional diário – linhas */}
           <div className="rounded-2xl border bg-white shadow-sm">
-            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> t/h operacional</div>
+            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> t/h operacional (colunas)</div>
             <div className="h-72 px-2 pb-4">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={tphOperationalSeries} margin={{ left: 4, right: 16, bottom: 8 }}>
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="date" /><YAxis /><Tooltip /><Legend />
-                  <Line type="monotone" dataKey="t/h Britagem" stroke="#3b82f6" dot={false}/>
-                  <Line type="monotone" dataKey="t/h Moagem" stroke="#10b981" dot={false}/>
+                  <Bar dataKey="t/h Britagem" fill="#3b82f6" />
+                  <Bar dataKey="t/h Moagem" fill="#10b981" />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
           </div>
 
-          {/* Empilhados por equipamento */}
           <div className="grid md:grid-cols-2 gap-4">
             <div className="rounded-2xl border bg-white shadow-sm">
               <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> Moagem por equipamento</div>
@@ -832,7 +796,6 @@ export default function App(){
             </div>
           </div>
 
-          {/* Lista + PDF de período */}
           <div className="rounded-2xl border bg-white shadow-sm">
             <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Filter className="h-5 w-5"/> Lançamentos (período aplicado)</div>
             <div className="px-4 pb-3 flex items-center gap-2">
@@ -899,13 +862,12 @@ export default function App(){
             </div>
           </div>
 
-          {/* RESUMO DO OURO */}
           <div className="rounded-2xl border bg-white shadow-sm">
             <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Star className="h-5 w-5"/> Resumo do Ouro</div>
             <div className="px-4 pb-4 grid md:grid-cols-5 gap-3">
               <div><label className="text-sm">Mês</label><input type="month" className="w-full px-3 py-2 border rounded-md" value={goldMonth} onChange={e=>setGoldMonth(e.target.value)} /></div>
               <div><label className="text-sm">Ouro recuperado (kg)</label><input type="number" step="0.001" className="w-full px-3 py-2 border rounded-md" value={goldKg} onChange={e=>setGoldKg(e.target.value)} /></div>
-              <div className="md:col-span-3 flex items-end gap-2">
+              <div className="md:col-span-3 flex items-center gap-2">
                 <div className="px-3 py-2 border rounded-md text-sm">Moagem do mês: <b>{formatNumber(goldCalcPeriod.tons)}</b> t</div>
                 <div className="px-3 py-2 border rounded-md text-sm">Teor médio: <b>{formatNumber(goldCalcPeriod.gt)}</b> g/t</div>
                 <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={saveGoldMonth}><Save className="inline h-4 w-4 mr-1"/>Salvar mês</button>
@@ -934,42 +896,9 @@ export default function App(){
               </div>
             )}
           </div>
-
-          {/* CONFIGURAÇÕES */}
-          <div className="rounded-2xl border bg-white shadow-sm">
-            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Settings className="h-5 w-5"/> Configurações</div>
-            <div className="px-4 pb-4 grid md:grid-cols-2 gap-6">
-              <div>
-                <div className="font-medium mb-2 flex items-center gap-2"><Wrench className="h-4 w-4"/> Equipamentos</div>
-                <div className="space-y-2">
-                  {equipments.map(eq => (
-                    <div key={eq.id} className="flex items-center gap-2 border rounded-md px-2 py-1">
-                      <span className="text-sm w-28">{eq.code}</span>
-                      <span className="text-xs text-slate-500 w-24">{eq.stage}</span>
-                      <label className="text-xs ml-auto flex items-center gap-1">
-                        <input type="checkbox" checked={eq.active} onChange={e=>setEquipments(prev=>prev.map(x=>x.id===eq.id?{...x,active:e.target.checked}:x))}/>
-                        ativo
-                      </label>
-                      <button className="px-2 py-1 border rounded-md hover:bg-slate-50 text-xs" onClick={()=>setEquipments(prev=>prev.filter(x=>x.id!==eq.id))}>Remover</button>
-                    </div>
-                  ))}
-                  <button className="px-3 py-2 border rounded-md hover:bg-slate-50 text-sm" onClick={()=>setEquipModal(true)}><Plus className="inline h-4 w-4 mr-1"/>Novo equipamento</button>
-                </div>
-              </div>
-              <div>
-                <div className="font-medium mb-2 flex items-center gap-2"><Target className="h-4 w-4"/> Metas fixas (t/h)</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div><label className="text-sm">Britagem</label><input type="number" step="0.01" className="w-full px-3 py-2 border rounded-md" value={targets.Britagem} onChange={e=>setTargets(t=>({...t, Britagem: Number(e.target.value||0)}))}/></div>
-                  <div><label className="text-sm">Moagem</label><input type="number" step="0.01" className="w-full px-3 py-2 border rounded-md" value={targets.Moagem} onChange={e=>setTargets(t=>({...t, Moagem: Number(e.target.value||0)}))}/></div>
-                </div>
-                <p className="text-xs text-slate-500 mt-2">Essas metas preenchem automaticamente o campo do formulário (pode destravar e editar por lançamento).</p>
-              </div>
-            </div>
-          </div>
         </div>
       </main>
 
-      {/* Modal: Equipamento */}
       {equipModal && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-lg p-4 w-full max-w-sm">
@@ -987,7 +916,6 @@ export default function App(){
         </div>
       )}
 
-      {/* Modal QR */}
       {qrOpen && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-lg p-4 w-full max-w-sm">
