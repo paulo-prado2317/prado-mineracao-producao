@@ -591,13 +591,51 @@ export default function App(){
     const a = document.createElement('a'); a.href = url; a.download = `backup_producao_${dayjs().format('YYYY-MM-DD_HH-mm-ss')}.json`; a.click(); URL.revokeObjectURL(url)
   }
   function importJSON(file){
-    const reader = new FileReader()
-    reader.onload = () => {
-      try { const data = JSON.parse(reader.result); if (!Array.isArray(data)) throw new Error('Formato inválido'); setEntries(data); setMsg('Backup importado com sucesso.'); setMsgTone('ok') }
-      catch { setMsg('Falha ao importar JSON.'); setMsgTone('error') }
+  const reader = new FileReader()
+  reader.onload = async () => {
+    try {
+      const raw = JSON.parse(reader.result)
+      if (!Array.isArray(raw)) throw new Error('Formato inválido')
+
+      // normaliza + injeta GROUP_ID (se houver)
+      const norm = raw.map(x => {
+        const y = { ...x }
+        if (!y.id) y.id = 'imp_' + uid()
+        if (!y.stage) y.stage = 'Moagem'
+        if (typeof y.stops_json === 'string') {
+          try { y.stops_json = JSON.parse(y.stops_json) } catch { y.stops_json = [] }
+        }
+        // garante números válidos
+        const numKeys = ['tonnage','moisture','hours','tph','downtime_min','op_hours','tph_operational','tph_target','tph_delta','grade']
+        for (const k of numKeys) {
+          if (y[k] === '' || y[k] === null || y[k] === undefined) { delete y[k]; continue }
+          const v = Number(y[k])
+          if (Number.isNaN(v) || !Number.isFinite(v)) delete y[k]; else y[k] = v
+        }
+        // injeta group_id padrão, se definido
+        if (GROUP_ID && !y.group_id) y.group_id = GROUP_ID
+        return y
+      })
+
+      // acrescenta localmente
+      setEntries(prev => [...prev, ...norm])
+
+      // enfileira para nuvem (será enviado ao clicar "Sincronizar")
+      norm.forEach(item => {
+        queuePending({ type: 'upsert', payload: item })
+      })
+
+      setMsg(`Importados ${norm.length} lançamentos. Clique em "Sincronizar" para enviar ao Supabase.`)
+      setMsgTone('ok')
+    } catch (e) {
+      console.error(e)
+      setMsg('Falha ao importar JSON. Verifique o arquivo.')
+      setMsgTone('error')
     }
-    reader.readAsText(file)
   }
+  reader.readAsText(file)
+}
+
 
   /* ---------- Ouro ---------- */
   const goldCalcPeriod = useMemo(() => {
