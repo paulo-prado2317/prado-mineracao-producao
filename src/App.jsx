@@ -184,19 +184,25 @@ export default function App(){
 
   /* ---------- Cloud sync ---------- */
   async function fetchEntriesFromCloud() {
-    if (!supabase || !session?.user) return
-    const { data, error } = await supabase
-      .from('production_entries')
-      .select('*')
-      .eq(GROUP_ID ? 'group_id' : 'user_id', GROUP_ID ? GROUP_ID : session.user.id)
-      .order('date', { ascending: true })
-    if (error) { setMsg('Falha ao buscar da nuvem: ' + (error.message || '')); setMsgTone('error'); return }
-    setEntries((prev) => {
-      const map = new Map(prev.map(e => [e.id, e]))
-      for (const e of (data || [])) map.set(e.id, e)
-      return Array.from(map.values()).sort((a,b) => a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.id).localeCompare(String(b.id)))
-    })
+  if (!supabase || !session?.user) return
+  let query = supabase.from('production_entries').select('*')
+
+  if (GROUP_ID) {
+    // pega linhas do grupo OU do usuário atual
+    query = query.or(`group_id.eq.${GROUP_ID},user_id.eq.${session.user.id}`)
+  } else {
+    query = query.eq('user_id', session.user.id)
   }
+
+  const { data, error } = await query.order('date', { ascending: true })
+  if (error) { setMsg('Falha ao buscar da nuvem: ' + (error.message || '')); setMsgTone('error'); return }
+  setEntries((prev) => {
+    const map = new Map(prev.map(e => [e.id, e]))
+    for (const e of (data || [])) map.set(e.id, e)
+    return Array.from(map.values()).sort((a,b) => a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.id).localeCompare(String(b.id)))
+  })
+}
+
   function subscribeRealtime() {
     if (!supabase || !session?.user || realtimeRef.current) return
     realtimeRef.current = supabase
