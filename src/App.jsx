@@ -6,13 +6,14 @@ import html2canvas from 'html2canvas'
 import {
   BarChart3, CalendarRange, Download, Factory, Filter, Hammer, LogIn, LogOut,
   Mail, Plus, RefreshCw, Save, Search, Trash2, Upload, Cloud, Database, FileText,
-  QrCode, Share2, Send, Settings, Wrench, PlusCircle, MinusCircle, Target, Star
+  QrCode, Share2, Send, Settings, Wrench, PlusCircle, MinusCircle, Target, Star, Users, Shield
 } from 'lucide-react'
 import {
   ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
-  Bar, ComposedChart, Line
+  Bar, ComposedChart
 } from 'recharts'
 
+/* ---------- Utils ---------- */
 function KPI({ icon, title, value }) {
   return (
     <div className="rounded-xl border bg-white p-3 shadow-sm">
@@ -23,29 +24,25 @@ function KPI({ icon, title, value }) {
     </div>
   )
 }
-
 function ClockIcon(){ return <span className="inline-block">⏱️</span> }
-
-function Message({ text, onClose }) {
+function Message({ text, onClose, tone='ok' }) {
   if (!text) return null
+  const color = tone === 'error' ? 'bg-rose-600' : 'bg-emerald-600'
   return (
     <div className="fixed top-3 left-1/2 -translate-x-1/2 z-50">
-      <div className="bg-emerald-600 text-white px-4 py-2 rounded-xl shadow">
+      <div className={`${color} text-white px-4 py-2 rounded-xl shadow`}>
         {text}
         <button className="ml-3 underline" onClick={onClose}>Fechar</button>
       </div>
     </div>
   )
 }
-
-const STORAGE_KEY = 'prado_mineracao_producao_v6'
+const STORAGE_KEY = 'prado_mineracao_producao_v7'
 const STORAGE_PENDING = 'prado_mineracao_pending_queue_v4'
 const STORAGE_EQUIP = 'prado_mineracao_equip_v1'
 const STORAGE_TARGETS = 'prado_mineracao_targets_v1'
 const STORAGE_GOLD = 'prado_mineracao_gold_v1'
-
 function uid(){ return Math.random().toString(36).slice(2) + Date.now().toString(36) }
-
 function parseTimeToHours(start, end){
   if (!start || !end) return 0
   const [sh, sm] = start.split(':').map(Number)
@@ -72,26 +69,28 @@ function formatNumber(n, frac=2){
   if (n === undefined || n === null || isNaN(n)) return '0'
   return new Intl.NumberFormat('pt-BR', { maximumFractionDigits: frac }).format(Number(n))
 }
-
 const EQUIP_COLORS = { 'MM-01': '#facc15', 'MM-02': '#f97316', 'BT-01': '#22c55e' }
 const PALETTE = ['#60a5fa','#a78bfa','#34d399','#f472b6','#f59e0b','#10b981','#ef4444','#14b8a6','#8b5cf6','#e11d48']
 const colorForEquipment = (name, idx) => EQUIP_COLORS[(name||'').toUpperCase()] || PALETTE[idx % PALETTE.length]
 
+/* ---------- Supabase ---------- */
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || ''
 const SUPABASE_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
 const supabase = (SUPABASE_URL && SUPABASE_ANON) ? createClient(SUPABASE_URL, SUPABASE_ANON) : null
 const APP_NAME = 'Mineração CANGAS II'
-const GROUP_ID = import.meta.env.VITE_GROUP_ID || null  // defina o ID do grupo para dados compartilhados
+const GROUP_ID = import.meta.env.VITE_GROUP_ID || null  // defina um UUID para compartilhar dados entre usuários
 
 export default function App(){
   const [session, setSession] = useState(null)
   const [isSyncing, setIsSyncing] = useState(false)
   const [msg, setMsg] = useState('')
+  const [msgTone, setMsgTone] = useState('ok')
   const emailRef = useRef(null)
 
   const today = dayjs().format('YYYY-MM-DD')
   const [entries, setEntries] = useState([])
 
+  // Form principal
   const [form, setForm] = useState({
     date: today, start: '07:00', end: '19:00', shift: 'Diurno',
     stage: 'Britagem', equipment: '', tonnage: '', moisture: '',
@@ -101,22 +100,34 @@ export default function App(){
   })
   const [allowEditTarget, setAllowEditTarget] = useState(false)
 
+  // Filtros
   const [filters, setFilters] = useState({ from: today, to: today, stage: 'Todos', query: '' })
-  const [quickMonth, setQuickMonth] = useState(dayjs().format('YYYY-MM'))
 
+  // Equipamentos, metas
   const [equipments, setEquipments] = useState([])
   const [equipModal, setEquipModal] = useState(false)
   const [newEquip, setNewEquip] = useState({ code: '', stage: 'Britagem', active: true })
   const [targets, setTargets] = useState({ Britagem: 0, Moagem: 0 })
 
+  // Ouro
   const [goldRecords, setGoldRecords] = useState([])
   const [goldMonth, setGoldMonth] = useState(dayjs().format('YYYY-MM'))
   const [goldKg, setGoldKg] = useState('')
 
+  // QR
   const [qrOpen, setQrOpen] = useState(false)
   const qrInstanceRef = useRef(null)
-  const realtimeRef = useRef(null)
 
+  // Realtime & grupo
+  const realtimeRef = useRef(null)
+  const [members, setMembers] = useState([])
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [addEmail, setAddEmail] = useState('')
+  const [addRole, setAddRole] = useState('member')
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [updatingRole, setUpdatingRole] = useState('')
+
+  /* ---------- Persistência local ---------- */
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY); if (raw) setEntries(JSON.parse(raw))
@@ -140,6 +151,7 @@ export default function App(){
     }
   }, [equipments.length])
 
+  /* ---------- Autenticação ---------- */
   useEffect(() => {
     if (!supabase) return
     supabase.auth.getSession().then(({ data }) => setSession(data.session || null))
@@ -147,6 +159,7 @@ export default function App(){
     return () => { sub?.subscription.unsubscribe() }
   }, [])
 
+  /* ---------- Helpers ---------- */
   function queuePending(op){
     if (op?.payload) op.payload = normalizePayload(op.payload)
     const raw = localStorage.getItem(STORAGE_PENDING)
@@ -154,7 +167,6 @@ export default function App(){
     list.push(op)
     localStorage.setItem(STORAGE_PENDING, JSON.stringify(list))
   }
-
   function normalizePayload(p){
     const q = { ...p }
     if (typeof q.stops_json === 'string') {
@@ -170,6 +182,7 @@ export default function App(){
     return q
   }
 
+  /* ---------- Cloud sync ---------- */
   async function fetchEntriesFromCloud() {
     if (!supabase || !session?.user) return
     const { data, error } = await supabase
@@ -177,14 +190,13 @@ export default function App(){
       .select('*')
       .eq(GROUP_ID ? 'group_id' : 'user_id', GROUP_ID ? GROUP_ID : session.user.id)
       .order('date', { ascending: true })
-    if (error) { setMsg('Falha ao buscar da nuvem: ' + (error.message || '')); return }
+    if (error) { setMsg('Falha ao buscar da nuvem: ' + (error.message || '')); setMsgTone('error'); return }
     setEntries((prev) => {
       const map = new Map(prev.map(e => [e.id, e]))
       for (const e of (data || [])) map.set(e.id, e)
       return Array.from(map.values()).sort((a,b) => a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.id).localeCompare(String(b.id)))
     })
   }
-
   function subscribeRealtime() {
     if (!supabase || !session?.user || realtimeRef.current) return
     realtimeRef.current = supabase
@@ -192,7 +204,6 @@ export default function App(){
       .on('postgres_changes', { event: '*', schema: 'public', table: 'production_entries', filter: GROUP_ID ? `group_id=eq.${GROUP_ID}` : `user_id=eq.${session.user.id}` }, () => { fetchEntriesFromCloud() })
       .subscribe()
   }
-
   async function flushPending(){
     if (!supabase || !session?.user) return
     const raw = localStorage.getItem(STORAGE_PENDING)
@@ -214,10 +225,10 @@ export default function App(){
         }
       }
       localStorage.removeItem(STORAGE_PENDING)
-      setMsg('Pendências sincronizadas.')
+      setMsg('Pendências sincronizadas.'); setMsgTone('ok')
     } catch (e){
       console.error('Supabase sync error:', e)
-      setMsg('Erro ao sincronizar pendências: ' + (e?.message || e?.error_description || '400'))
+      setMsg('Erro ao sincronizar pendências: ' + (e?.message || e?.error_description || '400')); setMsgTone('error')
     } finally {
       setIsSyncing(false)
       await fetchEntriesFromCloud()
@@ -235,16 +246,11 @@ export default function App(){
   }, [session])
 
   useEffect(() => {
-    return () => {
-      if (realtimeRef.current) {
-        try { supabase.removeChannel(realtimeRef.current) } catch {}
-        realtimeRef.current = null
-      }
-    }
+    return () => { if (realtimeRef.current) { try { supabase.removeChannel(realtimeRef.current) } catch {} ; realtimeRef.current = null } }
   }, [])
 
+  /* ---------- Derivados ---------- */
   const totalStopsMin = useMemo(() => (form.stops||[]).reduce((acc,s)=>acc+(diffMinutes(s.from,s.to)||0),0), [form.stops])
-
   useEffect(() => {
     const t = Number((targets||{})[form.stage] || 0)
     setForm(prev => ({ ...prev, tph_target: t ? String(t) : '' }))
@@ -303,11 +309,11 @@ export default function App(){
       } else {
         queuePending({ type: 'upsert', payload })
       }
-      setMsg('Lançamento adicionado.')
+      setMsg('Lançamento adicionado.'); setMsgTone('ok')
     } catch (e) {
       console.error('Supabase upsert error:', e)
       queuePending({ type: 'upsert', payload })
-      setMsg('Erro ao salvar no Supabase: ' + (e?.message || e?.error_description || '400') + ' — salvo offline para sincronizar depois.')
+      setMsg('Erro ao salvar no Supabase: ' + (e?.message || e?.error_description || '400') + ' — salvo offline para sincronizar depois.'); setMsgTone('error')
     }
 
     resetForm()
@@ -323,10 +329,10 @@ export default function App(){
       } else {
         queuePending({ type: 'delete', id })
       }
-      setMsg('Lançamento removido.')
+      setMsg('Lançamento removido.'); setMsgTone('ok')
     } catch (e) {
       queuePending({ type: 'delete', id })
-      setMsg('Erro ao remover no Supabase: ' + (e?.message || e?.error_description || '400') + ' — remoção pendente.')
+      setMsg('Erro ao remover no Supabase: ' + (e?.message || e?.error_description || '400') + ' — remoção pendente.'); setMsgTone('error')
     }
   }
 
@@ -335,11 +341,8 @@ export default function App(){
     Moagem: equipments.filter(e => e.stage === 'Moagem' && e.active),
   }), [equipments])
 
-  const [filtersState, setFiltersState] = useState(null)
-  useEffect(() => { setFiltersState(filters) }, [filters])
-
   const filtered = useMemo(() => {
-    const f = filtersState || filters
+    const f = filters
     const from = f.from ? dayjs(f.from) : null
     const to = f.to ? dayjs(f.to) : null
     return entries.filter((e) => {
@@ -350,7 +353,7 @@ export default function App(){
       const matchQ = !q || [e.operator, e.equipment, e.notes, e.shift].some(x => (x || '').toLowerCase().includes(q))
       return matchDate && matchStage && matchQ
     }).sort((a,b) => a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.id).localeCompare(String(b.id)))
-  }, [entries, filtersState])
+  }, [entries, filters])
 
   const sums = useMemo(() => {
     const sum = (arr, fn) => arr.reduce((acc, x) => acc + (fn(x) || 0), 0)
@@ -407,37 +410,18 @@ export default function App(){
   const { data: moagemStack, equipList: moagemEquipList } = useMemo(()=>stackedByEquipment('Moagem'), [filtered])
   const { data: britagemStack, equipList: britagemEquipList } = useMemo(()=>stackedByEquipment('Britagem'), [filtered])
 
-  async function exportHTMLToPDFPaginated(html, filename){
-    const wrapper = document.createElement('div')
-    wrapper.innerHTML = html
-    document.body.appendChild(wrapper)
-
-    const canvas = await html2canvas(wrapper, { scale: 2, backgroundColor: '#ffffff' })
-    const img = canvas.toDataURL('image/png')
-
-    const pdf = new jsPDF('p','mm','a4')
-    const pdfW = pdf.internal.pageSize.getWidth()
-    const pdfH = pdf.internal.pageSize.getHeight()
-
-    const imgH = (canvas.height * pdfW) / canvas.width
-    let heightLeft = imgH
-    let position = 0
-
-    pdf.addImage(img, 'PNG', 0, position, pdfW, imgH)
-    heightLeft -= pdfH
-
-    while (heightLeft > 0) {
-      position = -(imgH - heightLeft)
-      pdf.addPage()
-      pdf.addImage(img, 'PNG', 0, position, pdfW, imgH)
-      heightLeft -= pdfH
+  const stopsDaily = useMemo(() => {
+    const map = new Map()
+    for (const e of filtered){
+      const d = e.date
+      const m = Number(e.downtime_min || 0)
+      map.set(d, (map.get(d) || 0) + m)
     }
+    return Array.from(map.entries()).map(([date, minutes]) => ({ date, minutes })).sort((a,b)=>a.date<b.date?-1:1)
+  }, [filtered])
 
-    pdf.save(filename)
-    document.body.removeChild(wrapper)
-  }
-
-  function renderPeriodHTML(from, to){
+  /* ---------- PDF ---------- */
+  function renderSummaryHTML(from, to){
     const data = entries.filter(e => (!from || !dayjs(e.date).isBefore(dayjs(from))) && (!to || !dayjs(e.date).isAfter(dayjs(to))))
     const sum = (arr, fn) => arr.reduce((acc, x) => acc + (fn(x) || 0), 0)
     const brit = sum(data.filter(x=>x.stage==='Britagem'), x=>x.tonnage)
@@ -463,35 +447,67 @@ export default function App(){
       </div>
     `
   }
-  async function exportPeriodPDF(){ await exportHTMLToPDFPaginated(renderPeriodHTML(filters.from, filters.to), `relatorio_periodo_${filters.from}_a_${filters.to}.pdf`) }
 
-  function downloadBlob(blob, filename){
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url; a.download = filename; a.click()
-    URL.revokeObjectURL(url)
+  async function captureNodeImageById(id){
+    const node = document.getElementById(id)
+    if (!node) return null
+    const canvas = await html2canvas(node, { scale: 2, backgroundColor: '#ffffff' })
+    return canvas.toDataURL('image/png')
   }
-  async function htmlToPDFBlob(html){
-    const wrapper = document.createElement('div')
-    wrapper.innerHTML = html
-    document.body.appendChild(wrapper)
-    const canvas = await html2canvas(wrapper, { scale: 2, backgroundColor: '#ffffff' })
-    const img = canvas.toDataURL('image/png')
+
+  async function buildReportPDFBlob(){
     const pdf = new jsPDF('p','mm','a4')
     const pdfW = pdf.internal.pageSize.getWidth()
-    const pdfH = (canvas.height * pdfW) / canvas.width
-    pdf.addImage(img, 'PNG', 0, 0, pdfW, pdfH)
-    const blob = pdf.output('blob')
-    document.body.removeChild(wrapper)
-    return blob
+    const pdfH = pdf.internal.pageSize.getHeight()
+
+    // 1) Sumário + tabela
+    const summaryWrapper = document.createElement('div')
+    summaryWrapper.innerHTML = renderSummaryHTML(filters.from, filters.to)
+    document.body.appendChild(summaryWrapper)
+    const sumCanvas = await html2canvas(summaryWrapper, { scale: 2, backgroundColor: '#ffffff' })
+    const img = sumCanvas.toDataURL('image/png')
+    const imgH = (sumCanvas.height * pdfW) / sumCanvas.width
+    let heightLeft = imgH
+    let position = 0
+    pdf.addImage(img, 'PNG', 0, position, pdfW, imgH)
+    heightLeft -= pdfH
+    while (heightLeft > 0) {
+      position = -(imgH - heightLeft)
+      pdf.addPage()
+      pdf.addImage(img, 'PNG', 0, position, pdfW, imgH)
+      heightLeft -= pdfH
+    }
+    document.body.removeChild(summaryWrapper)
+
+    // 2) Gráficos (cada um numa página)
+    const chartIds = ['chart-daily','chart-tph','chart-moagem-equip','chart-britagem-equip','chart-stops']
+    for (const id of chartIds){
+      const dataUrl = await captureNodeImageById(id)
+      if (!dataUrl) continue
+      pdf.addPage()
+      pdf.addImage(dataUrl, 'PNG', 0, 0, pdfW, pdfH)
+    }
+
+    return pdf.output('blob')
   }
+
+  async function exportFullReportPDF(){
+    const blob = await buildReportPDFBlob()
+    const filename = `relatorio_com_graficos_${filters.from}_a_${filters.to}.pdf`
+    const fileURL = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = fileURL; a.download = filename; a.click()
+    URL.revokeObjectURL(fileURL)
+  }
+
   async function shareFileOrDownload({ blob, filename, title, text, fallbackWhatsApp=false }){
     const file = new File([blob], filename, { type: 'application/pdf' })
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       await navigator.share({ files: [file], title, text })
       return
     }
-    downloadBlob(blob, filename)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url)
     if (fallbackWhatsApp) {
       const msg = text || 'Envio do relatório em PDF. Anexar o arquivo baixado.'
       window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
@@ -502,23 +518,24 @@ export default function App(){
     }
   }
   async function sendPeriodWhatsApp(){
-    const blob = await htmlToPDFBlob(renderPeriodHTML(filters.from, filters.to))
+    const blob = await buildReportPDFBlob()
     await shareFileOrDownload({
-      blob, filename: `relatorio_periodo_${filters.from}_a_${filters.to}.pdf`,
+      blob, filename: `relatorio_com_graficos_${filters.from}_a_${filters.to}.pdf`,
       title: `Relatório ${dayjs(filters.from).format('DD/MM')} a ${dayjs(filters.to).format('DD/MM')}`,
       text: `Relatório ${dayjs(filters.from).format('DD/MM')} a ${dayjs(filters.to).format('DD/MM')}`,
       fallbackWhatsApp: true
     })
   }
   async function sendPeriodEmail(){
-    const blob = await htmlToPDFBlob(renderPeriodHTML(filters.from, filters.to))
+    const blob = await buildReportPDFBlob()
     await shareFileOrDownload({
-      blob, filename: `relatorio_periodo_${filters.from}_a_${filters.to}.pdf`,
+      blob, filename: `relatorio_com_graficos_${filters.from}_a_${filters.to}.pdf`,
       title: `Relatório ${dayjs(filters.from).format('DD/MM')} a ${dayjs(filters.to).format('DD/MM')}`,
-      text: `Segue relatório do período ${dayjs(filters.from).format('DD/MM')} a ${dayjs(filters.to).format('DD/MM')}.`
+      text: `Segue relatório (com gráficos) do período ${dayjs(filters.from).format('DD/MM')} a ${dayjs(filters.to).format('DD/MM')}.`
     })
   }
 
+  /* ---------- QR ---------- */
   async function openQR(){
     setQrOpen(true)
     setTimeout(initQR, 0)
@@ -543,7 +560,7 @@ export default function App(){
         (_err) => {}
       )
     } catch (e){
-      setMsg('Não foi possível acessar a câmera. Verifique permissões e HTTPS.')
+      setMsg('Não foi possível acessar a câmera. Verifique permissões e HTTPS.'); setMsgTone('error')
       setQrOpen(false)
     }
   }
@@ -553,6 +570,7 @@ export default function App(){
     setQrOpen(false)
   }
 
+  /* ---------- CSV / Backup ---------- */
   function exportCSV(){
     const header = ['id','user_id','group_id','data','inicio','fim','turno','etapa','equipamento','toneladas','umidade_%','operador','observacoes','horas','t/h','paradas_min','causas','h_oper','t/h_oper','t/h_meta','Δ_vs_meta','teor_g_t','paradas_json']
     const rows = entries.map(e => [
@@ -575,19 +593,19 @@ export default function App(){
   function importJSON(file){
     const reader = new FileReader()
     reader.onload = () => {
-      try { const data = JSON.parse(reader.result); if (!Array.isArray(data)) throw new Error('Formato inválido'); setEntries(data); setMsg('Backup importado com sucesso.') }
-      catch { setMsg('Falha ao importar JSON.') }
+      try { const data = JSON.parse(reader.result); if (!Array.isArray(data)) throw new Error('Formato inválido'); setEntries(data); setMsg('Backup importado com sucesso.'); setMsgTone('ok') }
+      catch { setMsg('Falha ao importar JSON.'); setMsgTone('error') }
     }
     reader.readAsText(file)
   }
 
+  /* ---------- Ouro ---------- */
   const goldCalcPeriod = useMemo(() => {
     const tons = entries.filter(e => String(e.date).startsWith(goldMonth) && e.stage === 'Moagem').reduce((a,x)=>a+(x.tonnage||0),0)
     const kg = Number(goldKg || 0)
     const gt = tons > 0 ? (kg*1000)/tons : 0
     return { tons, kg, gt }
   }, [entries, goldMonth, goldKg])
-
   function saveGoldMonth(){
     if (!goldMonth) return
     const kg = Number(goldKg || 0)
@@ -597,19 +615,71 @@ export default function App(){
     } else {
       setGoldRecords(prev => [...prev, { id: uid(), period: goldMonth, kg }])
     }
-    setMsg('Resumo do ouro salvo para o mês.')
+    setMsg('Resumo do ouro salvo para o mês.'); setMsgTone('ok')
   }
 
+  /* ---------- Admin do Grupo (RPCs no Supabase) ---------- */
+  async function refreshMembers(){
+    if (!supabase || !session?.user || !GROUP_ID) return
+    const { data, error } = await supabase.rpc('list_group_members', { p_group: GROUP_ID })
+    if (error) { console.warn('list_group_members', error); return }
+    setMembers(data || [])
+    setIsAdmin( (data||[]).some(m => m.user_id === session.user.id && m.role === 'admin') )
+  }
+  async function addMember(){
+    if (!addEmail.trim()) return setMsg('Informe um e-mail para adicionar.'), setMsgTone('error')
+    const email = addEmail.trim()
+    const { error } = await supabase.rpc('add_group_member_by_email', { p_group: GROUP_ID, p_email: email, p_role: addRole })
+    if (error) { setMsg('Falha ao adicionar: ' + (error.message || '')); setMsgTone('error'); return }
+    setAddEmail(''); setAddRole('member'); setMsg('Membro adicionado/atualizado.'); setMsgTone('ok')
+    await refreshMembers()
+  }
+  async function removeMember(email){
+    if (!confirm(`Remover ${email} do grupo?`)) return
+    const { error } = await supabase.rpc('remove_group_member_by_email', { p_group: GROUP_ID, p_email: email })
+    if (error) { setMsg('Falha ao remover: ' + (error.message || '')); setMsgTone('error'); return }
+    setMsg('Membro removido.'); setMsgTone('ok')
+    await refreshMembers()
+  }
+  async function inviteByEmail(){
+    if (!isAdmin) return setMsg('Apenas admin pode convidar.'), setMsgTone('error')
+    const email = inviteEmail.trim()
+    if (!email) return setMsg('Informe um e-mail para convite.'), setMsgTone('error')
+    if (!supabase) return setMsg('Supabase não configurado.'), setMsgTone('error')
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: window.location.href }
+    })
+    if (error) { setMsg('Falha ao enviar convite: ' + (error.message || '')); setMsgTone('error'); return }
+    setMsg('Convite enviado! Peça para o usuário abrir o e-mail.'); setMsgTone('ok')
+    setInviteEmail('')
+  }
+  async function updateMemberRole(email, role){
+    if (!isAdmin) return setMsg('Apenas admin pode alterar papéis.'), setMsgTone('error')
+    try{
+      setUpdatingRole(email)
+      const { error } = await supabase.rpc('add_group_member_by_email', { p_group: GROUP_ID, p_email: email, p_role: role })
+      if (error) throw error
+      setMsg('Papel atualizado.'); setMsgTone('ok')
+      await refreshMembers()
+    } catch(e){
+      setMsg('Falha ao atualizar papel: ' + (e.message || '')); setMsgTone('error')
+    } finally {
+      setUpdatingRole('')
+    }
+  }
+
+  /* ---------- UI ---------- */
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <Message text={msg} onClose={() => setMsg('')} />
+      <Message text={msg} tone={msgTone} onClose={() => setMsg('')} />
 
       <header className="sticky top-0 z-10 border-b bg-white/80 backdrop-blur">
         <div className="mx-auto max-w-7xl px-4 py-3 flex items-center gap-3">
           <div className="p-2 rounded-xl bg-slate-100"><Factory className="h-6 w-6" /></div>
           <div className="flex-1">
             <h1 className="text-xl md:text-2xl font-bold leading-tight">{APP_NAME} – Lançamentos & Dash</h1>
-            <p className="text-sm text-slate-500">Britagem e Moagem separados · Período livre · PWA offline · QR · PDF · Synced</p>
+            <p className="text-sm text-slate-500">Britagem e Moagem separados · Período livre · PWA offline · QR · PDF (com gráficos) · Synced</p>
           </div>
           <div className="flex items-center gap-2">
             <button className="px-3 py-2 border rounded-md text-sm hover:bg-slate-50" onClick={exportCSV}><Download className="inline mr-2 h-4 w-4"/>CSV</button>
@@ -634,12 +704,12 @@ export default function App(){
               <Mail className="h-4 w-4 text-slate-400"/>
               <input ref={emailRef} type="email" placeholder="seu@email.com" className="w-64 px-3 py-2 border rounded-md"/>
               <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={async()=>{
-                if (!supabase) { setMsg('Configure as variáveis do Supabase para autenticar.'); return }
+                if (!supabase) { setMsg('Configure as variáveis do Supabase para autenticar.'); setMsgTone('error'); return }
                 const email = emailRef.current?.value?.trim()
-                if (!email) return setMsg('Informe um e-mail válido.')
+                if (!email) return setMsg('Informe um e-mail válido.'), setMsgTone('error')
                 const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.href } })
-                if (error) return setMsg('Falha ao enviar link. Verifique o e-mail.')
-                setMsg('Link de acesso enviado ao e-mail.')
+                if (error) { setMsg('Falha ao enviar link. Verifique o e-mail.'); setMsgTone('error'); return }
+                setMsg('Link de acesso enviado ao e-mail.'); setMsgTone('ok')
               }}><LogIn className="inline mr-2 h-4 w-4"/>Entrar por e-mail</button>
             </div>
           )}
@@ -647,6 +717,7 @@ export default function App(){
       </header>
 
       <main className="mx-auto max-w-7xl p-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Coluna esquerda: formulário */}
         <div className="rounded-2xl border bg-white shadow-sm p-4">
           <div className="text-lg font-semibold flex items-center gap-2 mb-3"><Plus className="h-5 w-5"/> Novo Lançamento</div>
           <form onSubmit={handleSubmit} className="space-y-3">
@@ -677,7 +748,7 @@ export default function App(){
                     <div className="col-span-2"><label className="text-xs text-slate-500">Até</label><input type="time" className="w-full px-2 py-2 border rounded-md" value={s.to} onChange={e=>updateStop(s.id,{to:e.target.value})}/></div>
                     <div className="col-span-3"><label className="text-xs text-slate-500">Causa</label><input className="w-full px-2 py-2 border rounded-md" value={s.cause} onChange={e=>updateStop(s.id,{cause:e.target.value})}/></div>
                     <div className="col-span-1 text-right">
-                      <button type="button" className="px-2 py-1 border rounded-md hover:bg-slate-50" onClick={()=>removeStop(s.id)}>Remover</button>
+                      <button type="button" className="px-2 py-1 border rounded hover:bg-slate-50" onClick={()=>removeStop(s.id)}>Remover</button>
                     </div>
                   </div>
                 ))}
@@ -689,7 +760,7 @@ export default function App(){
               <div className="col-span-2"><label className="text-sm">Observações</label><textarea rows="3" className="w-full px-3 py-2 border rounded-md" value={form.notes} onChange={e=>setForm({...form, notes:e.target.value})}></textarea></div>
             </div>
 
-            <div className="flex items-center justify-between pt-2">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 pt-2">
               <div className="text-sm text-slate-500 flex items-center gap-2">
                 <ClockIcon/>
                 {(() => {
@@ -715,6 +786,7 @@ export default function App(){
           </form>
         </div>
 
+        {/* Coluna direita: dashboard e admin */}
         <div className="lg:col-span-2 space-y-4">
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <KPI icon={<Hammer className="h-5 w-5"/>} title="Britagem (filtro)" value={`${formatNumber(sums.britF)} t`} />
@@ -724,24 +796,21 @@ export default function App(){
             <KPI icon={<CalendarRange className="h-5 w-5"/>} title="Mês – Moagem" value={`${formatNumber(sums.moagMes)} t`} />
           </div>
 
-          <div className="rounded-2xl border bg-white shadow-sm">
-            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Filter className="h-5 w-5"/> Período do Dashboard</div>
-            <div className="px-4 pb-3 grid md:grid-cols-7 gap-3">
+          {/* Filtros período */}
+          <div className="rounded-2xl border bg-white shadow-sm p-3">
+            <div className="grid md:grid-cols-6 gap-2 items-end">
               <div><label className="text-sm">De</label><input type="date" className="w-full px-3 py-2 border rounded-md" value={filters.from} onChange={e=>setFilters({...filters, from:e.target.value})} /></div>
               <div><label className="text-sm">Até</label><input type="date" className="w-full px-3 py-2 border rounded-md" value={filters.to} onChange={e=>setFilters({...filters, to:e.target.value})} /></div>
               <div><label className="text-sm">Etapa</label><select className="w-full px-3 py-2 border rounded-md" value={filters.stage} onChange={e=>setFilters({...filters, stage:e.target.value})}><option>Todos</option><option>Britagem</option><option>Moagem</option></select></div>
-              <div className="md:col-span-2"><label className="text-sm">Busca</label><div className="flex items-center gap-2"><Search className="h-4 w-4 text-slate-400"/><input className="w-full px-3 py-2 border rounded-md" placeholder="Operador, equipamento, notas..." value={filters.query} onChange={e=>setFilters({...filters, query:e.target.value})} /></div></div>
-              <div><label className="text-sm">Atalho (mês)</label><input type="month" className="w-full px-3 py-2 border rounded-md" value={quickMonth} onChange={e=>setQuickMonth(e.target.value)} /></div>
-              <div className="flex items-end gap-2">
-                <button className="px-2 py-2 border rounded-md hover:bg-slate-50 text-sm" onClick={()=>setFilters(f=>({...f, from: `${quickMonth}-01`, to: `${quickMonth}-15`}))}>01–15</button>
-                <button className="px-2 py-2 border rounded-md hover:bg-slate-50 text-sm" onClick={()=>setFilters(f=>({...f, from: `${quickMonth}-16`, to: `${quickMonth}-31`}))}>16–31</button>
-                <button className="px-2 py-2 border rounded-md hover:bg-slate-50 text-sm" onClick={()=>{ const m = dayjs().format('YYYY-MM'); setFilters(f=>({...f, from:`${m}-01`, to:`${m}-31`})) }}>Mês atual</button>
-                <button className="px-2 py-2 border rounded-md hover:bg-slate-50 text-sm" onClick={()=>{ const d = dayjs().format('YYYY-MM-DD'); setFilters(f=>({...f, from:d, to:d})) }}>Hoje</button>
+              <div className="md:col-span-2"><label className="text-sm">Busca</label><input className="w-full px-3 py-2 border rounded-md" placeholder="operador, equipamento, observação..." value={filters.query} onChange={e=>setFilters({...filters, query:e.target.value})} /></div>
+              <div className="flex gap-2">
+                <button className="px-3 py-2 border rounded-md hover:bg-slate-50" onClick={()=>setFilters({ from: dayjs().startOf('month').format('YYYY-MM-DD'), to: dayjs().endOf('month').format('YYYY-MM-DD'), stage: 'Todos', query: '' })}><Filter className="inline h-4 w-4 mr-1"/>Este mês</button>
+                <button className="px-3 py-2 border rounded-md hover:bg-slate-50" onClick={()=>setFilters({ from: dayjs().format('YYYY-MM-DD'), to: dayjs().format('YYYY-MM-DD'), stage: 'Todos', query: '' })}><Filter className="inline h-4 w-4 mr-1"/>Hoje</button>
               </div>
             </div>
           </div>
 
-          <div className="rounded-2xl border bg-white shadow-sm">
+          <div className="rounded-2xl border bg-white shadow-sm" id="chart-daily">
             <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> Produção diária – Moagem × Britagem</div>
             <div className="h-72 px-2 pb-4">
               <ResponsiveContainer width="100%" height="100%">
@@ -755,7 +824,7 @@ export default function App(){
             </div>
           </div>
 
-          <div className="rounded-2xl border bg-white shadow-sm">
+          <div className="rounded-2xl border bg-white shadow-sm" id="chart-tph">
             <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> t/h operacional (colunas)</div>
             <div className="h-72 px-2 pb-4">
               <ResponsiveContainer width="100%" height="100%">
@@ -770,7 +839,7 @@ export default function App(){
           </div>
 
           <div className="grid md:grid-cols-2 gap-4">
-            <div className="rounded-2xl border bg-white shadow-sm">
+            <div className="rounded-2xl border bg-white shadow-sm" id="chart-moagem-equip">
               <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> Moagem por equipamento</div>
               <div className="h-72 px-2 pb-4">
                 <ResponsiveContainer width="100%" height="100%">
@@ -782,7 +851,7 @@ export default function App(){
                 </ResponsiveContainer>
               </div>
             </div>
-            <div className="rounded-2xl border bg-white shadow-sm">
+            <div className="rounded-2xl border bg-white shadow-sm" id="chart-britagem-equip">
               <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> Britagem por equipamento</div>
               <div className="h-72 px-2 pb-4">
                 <ResponsiveContainer width="100%" height="100%">
@@ -796,10 +865,103 @@ export default function App(){
             </div>
           </div>
 
+          <div className="rounded-2xl border bg-white shadow-sm" id="chart-stops">
+            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><BarChart3 className="h-5 w-5"/> Paradas por dia (minutos)</div>
+            <div className="h-72 px-2 pb-4">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={stopsDaily} margin={{ left: 4, right: 16, bottom: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="date" /><YAxis /><Tooltip /><Legend />
+                  <Bar dataKey="minutes" name="Paradas (min)" fill="#ef4444" />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Admin do Grupo */}
+          {GROUP_ID && session?.user && (
+            <div className="rounded-2xl border bg-white shadow-sm">
+              <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2">
+                <Users className="h-5 w-5"/> Admin do Grupo
+                {!isAdmin && <span className="text-xs ml-2 px-2 py-0.5 rounded bg-slate-100 text-slate-500 flex items-center gap-1"><Shield className="h-3 w-3"/>somente leitura</span>}
+              </div>
+              <div className="px-4 pb-3">
+                {isAdmin ? (
+                  <div className="grid md:grid-cols-3 gap-2 items-end">
+                    <div>
+                      <label className="text-sm">E-mail do novo membro</label>
+                      <input className="w-full px-3 py-2 border rounded-md" placeholder="usuario@empresa.com" value={addEmail} onChange={e=>setAddEmail(e.target.value)} />
+                      <p className="text-xs text-slate-500 mt-1">Peça para a pessoa abrir o app e fazer login pelo menos uma vez antes de adicioná-la.</p>
+                    </div>
+                    <div>
+                      <label className="text-sm">Papel</label>
+                      <select className="w-full px-3 py-2 border rounded-md" value={addRole} onChange={e=>setAddRole(e.target.value)}>
+                        <option value="member">Membro</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    </div>
+                    <div className="flex md:justify-end">
+                      <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={addMember}><Save className="inline mr-2 h-4 w-4"/>Adicionar/atualizar</button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-600">Você não é admin deste grupo. Peça a um admin para te dar permissão.</p>
+                )}
+              </div>
+              {isAdmin && (
+                <div className="px-4 pb-3">
+                  <div className="grid md:grid-cols-3 gap-2 items-end">
+                    <div>
+                      <label className="text-sm">Convidar por e-mail (envia link mágico)</label>
+                      <input className="w-full px-3 py-2 border rounded-md" placeholder="novo@empresa.com" value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)} />
+                      <p className="text-xs text-slate-500 mt-1">O convidado precisa abrir o e-mail e clicar no link para criar a conta.</p>
+                    </div>
+                    <div className="md:col-span-2 flex md:justify-end">
+                      <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={inviteByEmail}><Send className="inline mr-2 h-4 w-4"/>Enviar convite</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div className="px-4 pb-4 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-left text-slate-500"><tr className="border-b"><th className="py-2 pr-3">E-mail</th><th className="py-2 pr-3">Papel</th><th className="py-2 pr-3 text-right">Ações</th></tr></thead>
+                  <tbody>
+                    {(members||[]).map(m => (
+                      <tr key={m.user_id} className="border-b">
+                        <td className="py-2 pr-3">{m.email}</td>
+                        <td className="py-2 pr-3">
+                          {isAdmin ? (
+                            <div className="flex items-center gap-2">
+                              <select
+                                className="px-2 py-1 border rounded-md"
+                                value={m.role}
+                                onChange={(e)=>updateMemberRole(m.email, e.target.value)}
+                                disabled={updatingRole===m.email}
+                              >
+                                <option value="member">member</option>
+                                <option value="admin">admin</option>
+                              </select>
+                            </div>
+                          ) : m.role}
+                        </td>
+                        <td className="py-2 pr-0 text-right">
+                          {isAdmin && m.user_id !== session.user.id && (
+                            <button className="px-2 py-1 border rounded hover:bg-slate-50 text-red-600" onClick={()=>removeMember(m.email)} title="Remover"><Trash2 className="h-4 w-4"/></button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {(!members || members.length === 0) && <tr><td colSpan="3" className="py-6 text-center text-slate-400">Sem membros cadastrados.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           <div className="rounded-2xl border bg-white shadow-sm">
-            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Filter className="h-5 w-5"/> Lançamentos (período aplicado)</div>
+            <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><FileText className="h-5 w-5"/> Lançamentos (período aplicado)</div>
             <div className="px-4 pb-3 flex items-center gap-2">
-              <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={exportPeriodPDF}><FileText className="inline h-4 w-4 mr-1"/>PDF do Período</button>
+              <button className="px-3 py-2 rounded-md text-white bg-slate-900 hover:bg-slate-800" onClick={exportFullReportPDF}><FileText className="inline h-4 w-4 mr-1"/>PDF do Período (com gráficos)</button>
               <button className="px-3 py-2 border rounded-md hover:bg-slate-50" onClick={sendPeriodWhatsApp}><Send className="inline h-4 w-4 mr-1"/>WA</button>
               <button className="px-3 py-2 border rounded-md hover:bg-slate-50" onClick={sendPeriodEmail}><Share2 className="inline h-4 w-4 mr-1"/>E-mail</button>
             </div>
@@ -862,6 +1024,7 @@ export default function App(){
             </div>
           </div>
 
+          {/* Ouro */}
           <div className="rounded-2xl border bg-white shadow-sm">
             <div className="px-4 py-3 text-lg font-semibold flex items-center gap-2"><Star className="h-5 w-5"/> Resumo do Ouro</div>
             <div className="px-4 pb-4 grid md:grid-cols-5 gap-3">
@@ -899,6 +1062,7 @@ export default function App(){
         </div>
       </main>
 
+      {/* Modais */}
       {equipModal && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-lg p-4 w-full max-w-sm">
@@ -930,7 +1094,7 @@ export default function App(){
       )}
 
       <footer className="mx-auto max-w-7xl px-4 pb-8 pt-2 text-xs text-slate-500">
-        <div><b>Período livre:</b> ajuste "De/Até" para ver os gráficos no intervalo desejado. Gere o <b>PDF do Período</b> para compartilhar.</div>
+        <div><b>Período livre:</b> ajuste "De/Até" para ver os gráficos no intervalo desejado. O PDF agora inclui <b>todos os gráficos</b>, inclusive <b>Paradas (min)</b>.</div>
       </footer>
     </div>
   )
