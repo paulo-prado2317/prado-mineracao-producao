@@ -12,6 +12,86 @@ import {
   ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
   Bar, ComposedChart
 } from 'recharts'
+// === Helpers de normalização (garantem tipos certos para o Supabase)
+const toNum = (v) => {
+  if (v === '' || v === null || v === undefined) return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+const toInt = (v) => {
+  if (v === '' || v === null || v === undefined) return null
+  const n = parseInt(v, 10)
+  return Number.isFinite(n) ? n : null
+}
+const toDateISO = (v) => {
+  // espera YYYY-MM-DD; se vier Date/Dayjs, formata
+  try {
+    if (!v) return null
+    if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) return v
+    const d = dayjs(v)
+    return d.isValid() ? d.format('YYYY-MM-DD') : null
+  } catch { return null }
+}
+const toHHMM = (v) => {
+  if (!v) return null
+  const s = String(v).trim()
+  if (/^\d{2}:\d{2}$/.test(s)) return s
+  // tenta "H:MM" → "HH:MM"
+  const m = s.match(/^(\d{1,2}):(\d{2})$/)
+  if (m) return `${m[1].padStart(2,'0')}:${m[2]}`
+  return null
+}
+
+// Normaliza um lançamento vindo do import (AINDA SEM user_id).
+function normalizeImportedRow(row, GROUP_ID) {
+  const r = { ...row }
+
+  r.id = r.id || ('imp_' + Math.random().toString(36).slice(2, 10))
+  r.date = toDateISO(r.date)
+  r.start = toHHMM(r.start)
+  r.end = toHHMM(r.end)
+  r.shift = r.shift || null
+  r.stage = r.stage === 'Britagem' || r.stage === 'Moagem' ? r.stage : 'Moagem'
+  r.equipment = (r.equipment || '').toString().toUpperCase() || null
+
+  r.tonnage = toNum(r.tonnage)
+  r.moisture = toNum(r.moisture)
+  r.hours = toNum(r.hours)
+  r.op_hours = toNum(r.op_hours)
+  r.tph = toNum(r.tph)
+  r.tph_operational = toNum(r.tph_operational)
+  r.tph_target = toNum(r.tph_target)
+  r.tph_delta = toNum(r.tph_delta)
+  r.grade = toNum(r.grade)
+  r.downtime_min = toInt(r.downtime_min)
+
+  // stops_json deve ser ARRAY
+  if (Array.isArray(r.stops_json)) {
+    // ok
+  } else if (typeof r.stops_json === 'string') {
+    try { r.stops_json = JSON.parse(r.stops_json) } catch { r.stops_json = [] }
+  } else if (!r.stops_json) {
+    r.stops_json = []
+  }
+
+  // notas/operador
+  r.notes = r.notes || null
+  r.operator = r.operator || null
+
+  // anexa group_id (se existir)
+  if (GROUP_ID && !r.group_id) r.group_id = GROUP_ID
+
+  return r
+}
+
+// Normaliza um lançamento para enviar ao Supabase (ADICIONA user_id na hora do sync)
+function normalizeForDb(row, session, GROUP_ID) {
+  const r = normalizeImportedRow(row, GROUP_ID)
+  // user_id obrigatório para passar nas policies do “dono”
+  r.user_id = session?.user?.id || null
+  return r
+}
+
 
 /* ---------- Utils ---------- */
 function KPI({ icon, title, value }) {
@@ -601,40 +681,27 @@ export default function App(){
   reader.onload = async () => {
     try {
       const raw = JSON.parse(reader.result)
-      if (!Array.isArray(raw)) throw new Error('Formato inválido')
+      if (!Array.isArray(raw)) throw new Error('Arquivo JSON inválido: esperado um array.')
 
-      // normaliza + injeta GROUP_ID (se houver)
-      const norm = raw.map(x => {
-        const y = { ...x }
-        if (!y.id) y.id = 'imp_' + uid()
-        if (!y.stage) y.stage = 'Moagem'
-        if (typeof y.stops_json === 'string') {
-          try { y.stops_json = JSON.parse(y.stops_json) } catch { y.stops_json = [] }
-        }
-        // garante números válidos
-        const numKeys = ['tonnage','moisture','hours','tph','downtime_min','op_hours','tph_operational','tph_target','tph_delta','grade']
-        for (const k of numKeys) {
-          if (y[k] === '' || y[k] === null || y[k] === undefined) { delete y[k]; continue }
-          const v = Number(y[k])
-          if (Number.isNaN(v) || !Number.isFinite(v)) delete y[k]; else y[k] = v
-        }
-        // injeta group_id padrão, se definido
-        if (GROUP_ID && !y.group_id) y.group_id = GROUP_ID
-        return y
+      // normaliza e injeta group_id (se houver)
+      const norm = raw.map(x => normalizeImportedRow(x, GROUP_ID))
+
+      // adiciona localmente para já aparecer na UI
+      setEntries(prev => {
+        const map = new Map(prev.map(e => [e.id, e]))
+        for (const e of norm) map.set(e.id, e)
+        return Array.from(map.values())
       })
 
-      // acrescenta localmente
-      setEntries(prev => [...prev, ...norm])
-
-      // enfileira para nuvem (será enviado ao clicar "Sincronizar")
+      // Enfileira (usa o MESMO tipo do manual: "create")
       norm.forEach(item => {
-        queuePending({ type: 'upsert', payload: item })
+        queuePending({ type: 'create', payload: item })
       })
 
       setMsg(`Importados ${norm.length} lançamentos. Clique em "Sincronizar" para enviar ao Supabase.`)
       setMsgTone('ok')
     } catch (e) {
-      console.error(e)
+      console.error('Import JSON error:', e)
       setMsg('Falha ao importar JSON. Verifique o arquivo.')
       setMsgTone('error')
     }
@@ -712,6 +779,60 @@ export default function App(){
       setUpdatingRole('')
     }
   }
+async function syncPending() {
+  try {
+    if (!supabase || !session?.user) {
+      setMsg('Entre no aplicativo para sincronizar.')
+      setMsgTone('error')
+      return
+    }
+
+    const loadQueue = () => {
+      try { return JSON.parse(localStorage.getItem('pendingQueue') || '[]') } catch { return [] }
+    }
+    const saveQueue = (arr) => localStorage.setItem('pendingQueue', JSON.stringify(arr))
+
+    const queue = loadQueue()
+    if (!queue.length) {
+      setMsg('Sem pendências para sincronizar.')
+      setMsgTone('ok')
+      return
+    }
+
+    // aceita tanto type "create" quanto "upsert"
+    const payload = queue.map(job => normalizeForDb(job.payload || job, session, GROUP_ID))
+
+    const { data, error } = await supabase
+      .from('production_entries')
+      .upsert(payload, { onConflict: 'id' })
+      .select('*')
+
+    if (error) {
+      console.error('Supabase upsert error:', error)
+      setMsg(`Erro ao sincronizar: ${error.message || 'ver console'}`)
+      setMsgTone('error')
+      return
+    }
+
+    // limpa fila
+    saveQueue([])
+
+    // mescla retorno no estado local (pega valores oficiais do banco)
+    setEntries(prev => {
+      const map = new Map(prev.map(e => [e.id, e]))
+      for (const e of (data || [])) map.set(e.id, e)
+      return Array.from(map.values())
+    })
+
+    setMsg(`Sincronizado(s) ${data?.length ?? 0} lançamento(s).`)
+    setMsgTone('ok')
+  } catch (e) {
+    console.error('syncPending exception:', e)
+    setMsg('Falha inesperada ao sincronizar (ver console).')
+    setMsgTone('error')
+  }
+}
+
 
   /* ---------- UI ---------- */
   return (
